@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gdpr.owner.probe",
+  "description": "Liveness probe for declared data owners. Answered with gdpr.owner.alive by the registration stapel_analytics.apps makes, from the same process that consumes gdpr.erasure.requested.",
+  "type": "object",
+  "required": ["correlation_id"],
+  "properties": {
+    "correlation_id": { "type": "string", "format": "uuid" }
+  },
+  "additionalProperties": false
+}

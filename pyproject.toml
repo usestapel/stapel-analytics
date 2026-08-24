@@ -1,0 +1,85 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stapel-analytics"
+version = "0.1.0"
+description = "Analytics: event registry, ingest, funnels and adapter fan-out for the Stapel framework"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+keywords = ["django", "stapel", "analytics"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: Django",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+]
+dependencies = [
+    "stapel-core>=0.36.0,<1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/usestapel/stapel-analytics"
+Repository = "https://github.com/usestapel/stapel-analytics"
+Documentation = "https://github.com/usestapel/stapel-analytics#readme"
+Changelog = "https://github.com/usestapel/stapel-analytics/blob/main/CHANGELOG.md"
+Issues = "https://github.com/usestapel/stapel-analytics/issues"
+
+[project.optional-dependencies]
+# celery is optional at runtime (tasks.py degrades to plain callables), but
+# NOT optional for the test job: the beat-schedule tests skip without it,
+# and a skipped test is a gate nobody notices going quiet.
+all = ["celery>=5.3"]
+
+[tool.setuptools]
+package-dir = {"stapel_analytics" = "."}
+packages = ["stapel_analytics", "stapel_analytics.migrations"]
+
+[tool.setuptools.package-data]
+# The contract documents ship IN THE WHEEL: that is what makes
+# `stapel-catalog --from-installed` possible, i.e. what turns catalog
+# freshness from somebody's discipline into a property of the lockfile.
+# A module that keeps them repo-only publishes code an agent cannot read.
+# Every pattern below matches real files in the tree: a package-data entry
+# matching nothing is a wheel that silently ships less than the repo. The
+# docgen triad (docs/schema.json + capabilities/flows/errors.json) is not
+# emitted yet — MODULE.md §10 — so its patterns are absent rather than dead.
+stapel_analytics = [
+    "py.typed",
+    "CONFIG.MD",
+    "MODULE.md",
+    "migrations/*.py",
+    "schemas/**/*.json",
+    "translations/*.json",
+]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+# Single source for the git hooks and CI (they pass the same flags on the CLI).
+select = ["E", "F", "W"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+django_find_project = false
+addopts = "--tb=short -q --import-mode=importlib"
+
+[tool.coverage.run]
+omit = [
+    "*/tests/*",
+    "*/conftest.py",
+    "*/migrations/*",
+    # Harness entry point, same class as conftest.py: it exists so
+    # makemigrations/check run against the single settings block the suite
+    # uses, and it is exercised by running them, not by importing it.
+    "manage.py",
+]

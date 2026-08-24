@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "user.deleted",
+  "description": "The pre-0.5.0 account-closure signal, still consumed for one minor so a host on either stapel-gdpr version erases. Routed through the same erasure.erase('account', ...) as the 0.5.0 request — there is no second erasure implementation to drift.",
+  "type": "object",
+  "required": ["user_id"],
+  "properties": {
+    "user_id":        { "type": ["string", "integer"] },
+    "correlation_id": { "type": "string" }
+  },
+  "additionalProperties": true
+}

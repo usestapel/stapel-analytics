@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "analytics.events.recorded",
+  "description": "A batch of analytics events was appended to the event store. Carries the rows themselves (already PII-guarded, user ids hashed) so a fan-out consumer never has to re-read the store. Emitted inside the recording transaction; drives the server-side adapter fan-out.",
+  "type": "object",
+  "required": ["count", "events"],
+  "properties": {
+    "count": { "type": "integer", "minimum": 1 },
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "kind", "ts"],
+        "properties": {
+          "name":         { "type": "string" },
+          "kind":         { "type": "string", "enum": ["track", "page", "identify"] },
+          "props":        { "type": "object" },
+          "source":       { "type": "string" },
+          "anon_id":      { "type": "string" },
+          "user_hash":    { "type": "string" },
+          "session_id":   { "type": "string" },
+          "event_id":     { "type": "string" },
+          "unregistered": { "type": "boolean" },
+          "ts":           { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

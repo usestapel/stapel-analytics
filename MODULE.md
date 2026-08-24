@@ -1,0 +1,498 @@
+# MODULE.md — stapel-analytics
+
+Integration reference for **stapel-analytics**: what it stores, what it
+exposes, what it asks of a host, and which of its switches are decisions
+rather than tuning. `README.md` is the introduction; this is the contract.
+
+Design of record: `docs/pending/analytics-standard-v2.md` in the stapel
+workspace (the backend half; the frontend half is `docs/done/
+analytics-standard-v1.md`, shipped as `@stapel/analytics`), plus the
+`stapel-analytics` row of `docs/reference/module-roadmap.md`.
+
+---
+
+## 1. What it is
+
+The **backend half of the analytics standard**. The frontend facade shipped
+first — `@stapel/analytics` already does `track` / `identify` / `page`, a
+consent gate, an offline queue and client-side provider fan-out. What was
+missing was everything on the other side of the wire:
+
+```
+browser (@stapel/analytics)                 server modules
+   │ track / page / identify                    │ analytics.track
+   ▼                                            ▼
+POST /analytics/api/v1/events  ──►  registry check + PII guard
+                                            │
+   host comm Actions ──► COMM_BRIDGE ────────┤
+   (payment.completed, …)                    │
+                                             ▼
+                                  stapel_core.eventstore  ("analytics" stream)
+                                             │
+                    ┌────────────────────────┼────────────────────┐
+                    ▼                        ▼                    ▼
+              funnels / reports      analytics.events.recorded   erasure
+              (conversion by step)   ──► adapter fan-out         (GDPR Art. 17)
+```
+
+An **L2 data-plane module** with exactly **one table**:
+
+| Model | Table | Role |
+|---|---|---|
+| `Funnel` | `analytics_funnel` | the DEFINITION: ordered event names + a window |
+
+The events themselves have **no model here**. They go to
+`stapel_core.eventstore` — the fleet's append-only stream primitive, which
+is already the design's "partitionable table, retention is a setting". A second unbounded time-series table per deployment, with its
+own partitioning and its own scale-out story, would be three problems core
+solved once.
+
+App label `analytics`. UUID primary key on `Funnel`, `@access.standard`: a
+funnel names business milestones, never personal data. The EVENT rows are
+personal data, and they are administered (and erased) through the event
+store — see §7.
+
+---
+
+## 2. Mounting
+
+```python
+INSTALLED_APPS = [
+    ...,
+    "stapel_core.django.eventstore",   # REQUIRED: the event rows live here
+    "stapel_analytics",
+]
+
+# urls.py — the module bakes in the api/v1 segment (api-versioning.md §2)
+path("analytics/", include("stapel_analytics.urls"))   # -> /analytics/api/v1/...
+```
+
+Forgetting `stapel_core.django.eventstore` is the one mounting mistake that
+looks like a working install — the endpoint answers, the registry lists, the
+funnels save, and every batch raises on a missing table. `analytics.E001`
+refuses to let that boot quietly.
+
+---
+
+## 3. The event registry — the vocabulary this deployment admits
+
+Merge-registry, same semantics as everywhere in the fleet:
+
+```
+built-ins  <-  EVENTS_FILE (analytics/events.json)  <-  EVENTS  <-  register_event()
+```
+
+Last layer wins; a definition of `None` REMOVES an entry, including a
+built-in one. Names may be **patterns**: a trailing `*` matches a prefix, and
+an exact name beats a pattern (longest prefix wins among patterns).
+
+A definition is the same literal shape `@stapel/analytics`' `defineEvent`
+projects into `analytics/events.json`:
+
+```json
+{"name": "listing.published",
+ "description": "A seller published a listing",
+ "props": {"listing_id": {"type": "string", "description": "…"}},
+ "flow": "sell"}
+```
+
+That is the point: the frontend declares events next to the code that fires
+them, `gen:events` projects them into `events.json`, and the same file is the
+backend's registry. **One vocabulary, two runtimes, no hand-maintained copy.**
+Both shapes load — a list (what `events.json` contains) and a map (what a
+settings dict is), with or without a `{"events": [...]}` envelope.
+
+Built-ins: `flow.*` (the frontend flow auto-instrumentation of
+analytics-standard §1.2) and `identify` (the facade's own event kind).
+
+**Validation is a WARNING by default.** An unregistered `track` is stored and
+marked `unregistered`, never dropped: losing the event and the evidence of
+the mistake at the same time is the one outcome an ingest must not have.
+`REGISTRY_MODE = "reject"` refuses instead; `"off"` disables the check (and
+says so at boot). Only `kind: "track"` is validated — a `page` name is a path
+chosen at render time and an `identify` name is the literal string
+`"identify"`.
+
+Three ways to ask:
+
+```python
+from stapel_analytics import event_registry
+event_registry()["listing.published"]["props"]     # in-process
+
+call("analytics.event_registry", {})               # over comm
+GET /analytics/api/v1/event-registry               # over HTTP
+python manage.py analytics_event_registry          # from a shell
+```
+
+---
+
+## 4. HTTP surface
+
+| Route | Method | Access | Notes |
+|---|---|---|---|
+| `/events` | POST | **anonymous** | the collector — `@stapel/analytics` posts here |
+| `/event-registry` | GET | mandate | the vocabulary, the mode, live adapters, bridged actions |
+| `/funnels` | GET, POST | mandate | the caller's funnels + the declared ones (`?mine=`, `?limit=`); POST authors one |
+| `/funnels/<slug>` | GET, PATCH, DELETE | owner/staff | PATCH re-validates the WHOLE rule |
+| `/funnels/<slug>/report` | GET | owner/staff | `?start=&end=&compare=` |
+| `/reports/events` | GET | staff | counts by `name` / `source` / `kind` |
+| `/error-keys/` | GET | staff/service | the listing the stapel-translate collector reads |
+
+"mandate" is `HasWorkspaceMandateIfScoped` — the library-shaped gate: where a
+deployment can answer the mandate question it enforces the third principal
+state (a registered account belonging to no workspace is a guest, not a
+user), and where nothing can answer it, nobody holds one and it admits. The
+strict class would 503 everyone in a single-tenant host, and analytics must
+be installable there. Ownership is the scope layered on top.
+
+A stranger's funnel answers **404, not 403**: a slug is guessable, and
+"exists but not yours" is an oracle for which funnels another tenant runs —
+which is a description of their product roadmap. An *unowned* funnel (created
+in code, or by an erased account) answers 403: it is an operator's object.
+
+### Why ingest is open, and what guards it instead
+
+`AllowAny`, and by default an **empty authenticator list**
+(`INGEST_AUTHENTICATION`). Three reasons, all of them structural:
+
+1. the identity of an analytics event is the `user_hash` INSIDE the payload,
+   already hashed by the browser — a session adds nothing;
+2. the last batch of a session arrives via `navigator.sendBeacon`, which
+   carries no CSRF token, and DRF's `SessionAuthentication` enforces CSRF
+   from inside authentication;
+3. the authorization that matters is the SOURCE (`WRITE_KEYS`), not the
+   visitor.
+
+What guards it: `MAX_BODY_BYTES`, `MAX_BATCH_SIZE`, `MAX_PROPS_BYTES`,
+`MAX_NAME_LENGTH`, `MAX_ID_LENGTH`, the age/skew bounds, the PII guard and —
+when a host turns it on — `REQUIRE_WRITE_KEY`. A host that wants
+token-authenticated ingest names its classes in `INGEST_AUTHENTICATION`.
+
+### The wire format
+
+```json
+POST /analytics/api/v1/events
+{
+  "write_key": "wk_live_…",          // optional; names the source
+  "anon_id": "…", "session_id": "…", // optional batch-level defaults
+  "events": [
+    {"id": "1755000000000-1",        // the facade's own id
+     "kind": "track",                // track | page | identify
+     "name": "listing.published",
+     "props": {"listing_id": "abc"},
+     "userHash": "<sha256 hex>",     // camelCase — what the facade sends
+     "ts": 1755000000000}            // epoch MILLISECONDS
+  ]
+}
+```
+
+Every per-event field is read in **both spellings** (`userHash`/`user_hash`,
+`anonId`/`anon_id`, `sessionId`/`session_id`): the facade speaks the first,
+every server-side producer speaks the second, and making them disagree would
+hand somebody a translation layer to write by hand. `traits` is read as
+`props` (that is what `identify()` sends). `ts` accepts epoch milliseconds
+(what `Date.now()` produces) or an ISO-8601 string.
+
+**Answer: 202 with a receipt**, even when some events were refused.
+
+```json
+{"accepted": 19,
+ "rejected": [{"index": 7, "name": "checkout.paid", "reason": "pii",
+               "detail": "props.contact"}],
+ "unregistered": ["checkout.paid"],
+ "source": "web"}
+```
+
+Partial acceptance is deliberate. The facade retries a batch until its ladder
+gives up and DROPS all twenty events, so condemning nineteen good ones for
+one bad one loses nineteen. A batch-level fault (bad shape, oversized, missing
+write key) is a real 4xx — that one IS the caller's request being wrong.
+
+Rejection reasons: `pii`, `unregistered`, `missing_name`, `name_too_long`,
+`unknown_kind`, `not_an_object`, `props_not_an_object`,
+`props_not_serializable`, `props_too_large`, `invalid_ts`, `too_old`. Each
+maps to an i18n key (`stapel_analytics.errors.REJECTION_KEYS`).
+
+### The legacy alias
+
+`@stapel/analytics` 0.1 hardcodes `COLLECTOR_PATH = "/analytics/api/events"`
+— an un-versioned path the fleet canon does not have, and it shipped before
+this module existed. So the same view is ALSO mounted there:
+
+```
+/analytics/api/v1/events      canon (api-versioning.md §2)
+/analytics/api/events         compatibility alias, LEGACY_INGEST_ALIAS
+```
+
+It is a compatibility surface with an end date, not a second API — it goes
+when the facade targets `api/v1` (§10). `LEGACY_INGEST_ALIAS = False` drops
+it today.
+
+---
+
+## 5. Funnels
+
+A funnel is an ordered list of event names plus a conversion window. Two
+sources, merged, authored OVER declared:
+
+- **declared** — `STAPEL_ANALYTICS["FUNNELS"]`, the Studio project-spec path
+  (analytics-standard §4: the CTO agent declares a funnel together with the
+  feature). Read-only over the API: its home is the spec, and an edit the
+  next deploy silently reverts is worse than a refusal (409).
+- **authored** — rows of the `Funnel` table, created over the API.
+
+**Computation.** One pass over the stream for the step names in the period,
+grouped by SUBJECT (`SUBJECT_RESOLVER`: user hash, else anonymous id, else
+session id). Per subject, steps are walked in order: the earliest step-1
+event opens the window; each later step counts only if it happened at or
+after the previous step and **within `window_seconds` of the FIRST one**.
+That is the classic conversion window; stating it matters because the
+alternative (window from the previous step) gives different numbers for the
+same data and neither is "wrong". `window_seconds = 0` means unbounded.
+
+`?compare=true` computes the same funnel over the **equal-length period
+immediately preceding** the requested one — the only definition that stays
+honest when somebody asks for eleven days.
+
+Bounded by `MAX_REPORT_EVENTS`: a report that hits the bound comes back
+`truncated: true` rather than becoming an unbounded scan somebody triggers by
+widening a date picker.
+
+Steps are validated **at authoring time** against the registry. A funnel with
+a step nothing can emit reports 100% to step 1 and 0% after it forever, and
+looks like a product problem rather than a typo.
+
+---
+
+## 6. The comm bridge — server steps of the same funnels
+
+```python
+STAPEL_ANALYTICS = {
+    "COMM_BRIDGE": {
+        # the short form: action name -> analytics event name
+        "payment.completed": "payment_completed",
+        # the long form
+        "email.delivered": {
+            "event": "welcome_email_delivered",
+            "props": ["template"],                     # payload allowlist
+            "mapper": "app.analytics.map_email",       # or a dotted path
+        },
+    }
+}
+```
+
+This is what makes a funnel able to END in something that happens on a
+server. The subject is taken from the payload the way the fleet names people:
+`user_id` (hashed HERE, exactly as the browser hashes it, so the server step
+joins the clicks that preceded it), or `user_hash` / `anon_id` / `session_id`
+when the emitter already speaks analytics. The raw `user_id` never reaches
+the store.
+
+Without an allowlist or a mapper, the bridge carries the payload's **scalar**
+keys only. Nested structures are dropped rather than flattened: a bridged
+event should read like a milestone, not like a copy of somebody else's
+aggregate.
+
+Configured-but-broken is loud: an unimportable or non-callable mapper raises
+`ImproperlyConfigured` at `ready()`, because a bridge that quietly does not
+fire looks exactly like a funnel with a bad conversion rate.
+
+Server modules can also call it directly:
+
+```python
+from stapel_analytics import track
+track("payment_completed", {"amount": 10}, user_id=user.id)
+
+call("analytics.track", {"name": "payment_completed", "user_id": str(user.id)})
+```
+
+Both go through the same registry check and the same PII guard as HTTP
+ingest — an app-layer module that could bypass either would be the hole the
+guard exists to close.
+
+---
+
+## 7. Privacy and erasure
+
+**Analytics rows are user data.** A behavioural stream keyed to a person is
+personal data whether or not a name appears in it; hashing the user id is
+pseudonymisation, not anonymisation. So the erasure provider ships in the
+same release as the ingest.
+
+- **PII guard** (`PII_MODE`, default `reject`): prop VALUES that look like an
+  email or a phone number refuse the event and the receipt names the prop
+  (`props.contact.phone`). `strip` redacts and stores; `warn` logs and
+  stores; `off` disables (and `analytics.W002` says so). Keys are never
+  judged — `{"email_verified": true}` is not PII and
+  `{"note": "call 555-0100"}` is. Same heuristics as the frontend's `pii.ts`,
+  with one deliberate one-directional refinement: an ISO-8601 date matches
+  the phone SHAPE and is exempted here (the browser still redacts it, so the
+  two tiers never disagree about a value that actually travels).
+- **User hash**: `sha256(USER_HASH_SALT + user_id)`, and the salt is EMPTY by
+  default because `@stapel/analytics`' `hash.ts` hashes unsalted. A salt is a
+  real privacy improvement and a real break of the client/server funnel join
+  — `analytics.W008` states the trade on every boot.
+- **Erasure** (`stapel_analytics.erasure`): owner name `analytics`, subject
+  types `account` and `anon`. The policy is **hard delete**, not anonymize —
+  an analytics row stripped of its subject cannot be attributed, funnelled or
+  reported on, so keeping it is "we kept a little bit".
+  `erase_account` also purges the anonymous sessions the person was ever seen
+  under, collected BEFORE the first pass because the linking rows are about
+  to go. Both protocols reach the same code: the 0.5.0 bus request (wired by
+  `stapel_core.gdpr.register_gdpr_owner` in `apps.py` — erasure request,
+  owner probe, legacy `user.deleted`) and the in-process
+  `AnalyticsGDPRProvider`.
+- **Retention** (`RETENTION_DAYS`, default 400 days), applied by
+  `manage.py purge_analytics` / `stapel_analytics.tasks.purge_analytics_events`.
+  `None` means keep forever, which for personal data is a decision —
+  `analytics.W005` accepts either this horizon or the event store's own
+  per-stream `RETENTION`.
+
+Declare the owner in the host:
+
+```python
+STAPEL_GDPR = {"DATA_OWNERS": [..., "analytics"]}
+```
+
+---
+
+## 8. Server-side fan-out
+
+Open adapter registry, same merge semantics as the event registry:
+
+```
+built-ins  <-  ADAPTERS  <-  register_adapter()
+```
+
+An entry merges OVER its built-in and `config` merges one level deep, so a
+host names a URL without restating a handler it did not write. `None`
+removes.
+
+```python
+STAPEL_ANALYTICS = {
+    "ADAPTERS": {
+        "webhook": {"enabled": True, "config": {"url": "https://collect…"}},
+        "posthog": {"handler": "app.analytics.posthog", "enabled": True},
+    }
+}
+```
+
+Built-ins: `webhook` (POST the batch as JSON, through the fleet's SSRF guard)
+and `log` (dev mirror of the frontend's console provider). **Both ship
+disabled** — the webhook has no URL to send to, and writing every analytics
+event into the application log puts the data the PII guard just protected
+into a log aggregator nobody scoped.
+
+**Delivery is out of band, never inline** (design §3: delivery goes through
+the outbox, not inline). Recording appends to the store and emits
+`analytics.events.recorded` inside the same transaction; that Action travels
+comm's transactional outbox and the consumer in `actions.py` calls the
+adapters. Nothing a third-party adapter does can be paid for by the browser
+that sent the batch.
+
+A failing adapter is **contained**, not retried: the store is the record,
+fan-out is a mirror, and re-raising would re-deliver the batch to the
+adapters that succeeded. Recovery is explicit and idempotent by range:
+
+```
+python manage.py analytics_fanout --since 2026-08-24T00:00:00Z --adapter posthog
+```
+
+A vendor SDK is never a built-in: it is one file in the app layer plus one
+line of settings — which is exactly the fast-track contribution class
+analytics-standard §5 describes.
+
+---
+
+## 9. Settings — `STAPEL_ANALYTICS`
+
+| Key | Default | What it decides |
+|---|---|---|
+| `EVENTS` | `{}` | merge-registry of event definitions; `None` removes |
+| `EVENTS_FILE` | `None` | path to the project's `analytics/events.json` |
+| `REGISTRY_MODE` | `"warn"` | `warn` (store+mark) / `reject` / `off` |
+| `MAX_BATCH_SIZE` | `500` | events per batch; larger is refused whole |
+| `MAX_BODY_BYTES` | `1048576` | request body cap (413) |
+| `MAX_PROPS_BYTES` | `16384` | per-event props cap |
+| `MAX_NAME_LENGTH` | `200` | longest event/page/source name |
+| `WRITE_KEYS` | `{}` | `{write_key: source_name}` |
+| `REQUIRE_WRITE_KEY` | `False` | **decision**: refuse an unkeyed batch (401) |
+| `DEFAULT_SOURCE` | `"web"` | source when no key names one |
+| `INGEST_AUTHENTICATION` | `[]` | authenticator dotted paths for the ingest view only |
+| `MAX_CLOCK_SKEW_SECONDS` | `300` | a clock further ahead is corrected to server time |
+| `MAX_EVENT_AGE_SECONDS` | `604800` | older events are refused as a stale replay; `0` disables |
+| `PII_MODE` | `"reject"` | **decision**: `reject` / `strip` / `warn` / `off` |
+| `USER_HASH_SALT` | `""` | **decision**: a salt breaks the frontend funnel join |
+| `MAX_ID_LENGTH` | `128` | anon/session id truncation |
+| `STREAM` | `"analytics"` | event-store stream name |
+| `RETENTION_DAYS` | `400` | **decision**: `None` = keep forever |
+| `PURGE_SCHEDULE` | `{"hour": 4, "minute": 30}` | beat cadence for the purge |
+| `QUERY_PAGE_SIZE` | `1000` | rows per store page on a report/erasure pass |
+| `MAX_REPORT_EVENTS` | `200000` | scan ceiling; a report past it is `truncated` |
+| `FUNNELS` | `{}` | funnels declared by the project spec (read-only over the API) |
+| `DEFAULT_FUNNEL_WINDOW_SECONDS` | `604800` | window when a funnel names none |
+| `MAX_FUNNEL_STEPS` | `12` | steps per funnel |
+| `MAX_FUNNELS_PER_OWNER` | `50` | authored funnels per user |
+| `ADAPTERS` | `{}` | merge-registry of fan-out adapters; `None` removes |
+| `FANOUT_ENABLED` | `True` | emit `analytics.events.recorded` at all |
+| `FANOUT_BATCH_SIZE` | `200` | events per fan-out Action |
+| `COMM_BRIDGE` | `{}` | `{action_name: event_name \| spec}` |
+| `SERVER_SOURCE` | `"server"` | source on bridged / `track()` events |
+| `MAX_PAGE_SIZE` | `100` | cap on the funnel listing (`?limit=` may ask for less) |
+| `LEGACY_INGEST_ALIAS` | `True` | mount `/analytics/api/events` for the shipped facade |
+| `SUBJECT_RESOLVER` | `…ingest.default_subject` | dotted path: what "the same person" means |
+| `PII_GUARD` | `…privacy.looks_like_pii` | dotted path: the PII heuristic |
+
+`SUBJECT_RESOLVER` and `PII_GUARD` are `import_strings` members: they NAME
+CODE, so they are never readable from an environment variable.
+
+### System checks
+
+| Id | Level | Fires when |
+|---|---|---|
+| `analytics.E001` | Error | the default event store is used and `stapel_core.django.eventstore` is not installed |
+| `analytics.E002` | Error | `EVENTS_FILE` cannot be read or parsed |
+| `analytics.W001` | Warning | nothing beyond the built-ins is declared |
+| `analytics.W002` | Warning | `PII_MODE = "off"` |
+| `analytics.W003` | Warning | `REGISTRY_MODE = "off"` |
+| `analytics.W004` | Warning | a funnel names steps outside the registry |
+| `analytics.W005` | Warning | no retention horizon anywhere |
+| `analytics.W006` | Warning | an enabled adapter cannot deliver |
+| `analytics.W007` | Warning | the comm bridge targets unregistered events |
+| `analytics.W008` | Warning | `USER_HASH_SALT` is set (the join breaks) |
+| `analytics.W009` | Warning | `analytics` is not in `STAPEL_GDPR["DATA_OWNERS"]` |
+| `analytics.W010` | Warning | `REQUIRE_WRITE_KEY` on with no `WRITE_KEYS` |
+
+---
+
+## 10. comm surface, commands, and the open follow-ups
+
+**Functions** (`schemas/functions/`): `analytics.track`,
+`analytics.event_registry`, `analytics.funnel_report`.
+**Emits** (`schemas/emits/`): `analytics.events.recorded`, plus the GDPR
+receipts `gdpr.section.erased` / `gdpr.owner.alive`.
+**Consumes** (`schemas/consumes/`, documentation only — `autoload_schemas`
+registers `emits/` and `functions/`): `gdpr.erasure.requested`,
+`gdpr.owner.probe`, `user.deleted`, plus whatever `COMM_BRIDGE` names.
+
+**Commands**: `analytics_event_registry`, `analytics_funnel_report`,
+`analytics_fanout`, `purge_analytics`.
+
+**Follow-ups filed here rather than left implicit:**
+
+1. `@stapel/analytics` should target `/analytics/api/v1/events` and send
+   `anon_id` / `session_id`; then `LEGACY_INGEST_ALIAS` can default to
+   `False` and be removed a minor later.
+2. The frontend's `pii.ts` should adopt the ISO-8601 exemption this module
+   ships (§7), so the two guards are identical again rather than
+   one-directionally compatible.
+3. `post_json` in `transport.py` duplicates the POST shape stapel-webhooks
+   also carries around core's GET-only `fetch_bytes`. Both are waiting on a
+   `post_bytes` in `stapel_core.net`.
+4. The funnel DASHBOARD of analytics-standard §3 (the house dashboard
+   pattern, as in stapel-translate) is not built: this ships the data behind it
+   (`/funnels/<slug>/report`, `/reports/events`) and Studio renders it.
+5. Erasure purges by a JSON payload key, which is correct on every backend
+   and slow on a large Postgres stream. The scale-out answer is the event
+   store's own (`STAPEL_EVENTSTORE["ROUTES"]` to a column-store backend),
+   not a schema here.

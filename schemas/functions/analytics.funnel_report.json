@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "analytics.funnel_report",
+  "description": "Conversion by step for one funnel over a period, optionally against the equal-length period before it.",
+  "type": "object",
+  "required": ["slug"],
+  "properties": {
+    "slug":    { "type": "string" },
+    "start":   { "type": "string" },
+    "end":     { "type": "string" },
+    "compare": { "type": "boolean" }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "analytics.track",
+  "description": "Record one server-side analytics event (analytics-standard §3). user_id is hashed here the same way @stapel/analytics hashes it in the browser, so a server step joins the client steps of the same person.",
+  "type": "object",
+  "required": ["name"],
+  "properties": {
+    "name":       { "type": "string" },
+    "props":      { "type": "object" },
+    "user_id":    { "type": ["string", "integer"] },
+    "user_hash":  { "type": "string" },
+    "anon_id":    { "type": "string" },
+    "session_id": { "type": "string" },
+    "source":     { "type": "string" }
+  },
+  "additionalProperties": false
+}

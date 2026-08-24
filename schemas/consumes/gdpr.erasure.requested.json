@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gdpr.erasure.requested",
+  "description": "An erasure was opened for one subject (stapel-gdpr 0.5.0). stapel-analytics answers for subject_type account | anon and ignores the rest; the answer is gdpr.section.erased with the same correlation_id. Subscribed by stapel_core.gdpr.register_gdpr_owner, not by hand — this file is the documented contract, not the registered schema.",
+  "type": "object",
+  "required": ["correlation_id", "subject_type", "subject_key"],
+  "properties": {
+    "request_id":     { "type": "integer" },
+    "correlation_id": { "type": "string", "format": "uuid" },
+    "subject_type":   { "type": "string", "examples": ["account", "anon"] },
+    "subject_key":    { "type": "string" },
+    "workspace_id":   { "type": "string" },
+    "requested_by":   { "type": "string" },
+    "origin":         { "type": "string", "enum": ["user", "dsar", "inactivity", "restore_requeue", "admin"] },
+    "due_at":         { "type": "string", "format": "date-time" }
+  },
+  "additionalProperties": false
+}

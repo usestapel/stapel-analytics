@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "analytics.event_registry",
+  "description": "The event vocabulary this deployment admits: built-ins merged under the project's events.json and STAPEL_ANALYTICS['EVENTS']. Read by the Studio verifier to compare the declared registry with the calls the code actually makes.",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

@@ -1,0 +1,93 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install stapel-core
+        run: pip install git+https://github.com/usestapel/stapel-core.git
+
+      # Optional dependencies are NOT optional for the test job: a test that
+      # imports celery, boto3 or a vendor SDK fails at collection when CI
+      # installed the base package only — a red run on green code, and two
+      # release numbers burned before anyone reads the traceback.
+      # `pip install ".[all]" || pip install .` hid a genuine resolution
+      # failure behind the fallback, so the extra is chosen from
+      # pyproject.toml instead of from whether the first install crashed.
+      - name: Install (editable, with the `all` extra when this package declares one)
+        # Editable on purpose: ROOT_URLCONF is `stapel_analytics.tests.urls`
+        # and several tests resolve seams (mappers, PII guards, presenters,
+        # an event-store backend) by dotted path INSIDE tests/, which a
+        # non-editable install does not ship — plain `pip install .` makes
+        # every CI run red while the local suite is green.
+        run: |
+          if python -c "import sys, tomllib; sys.exit(0 if 'all' in tomllib.load(open('pyproject.toml', 'rb')).get('project', {}).get('optional-dependencies', {}) else 1)"; then
+            echo "pyproject declares an [all] extra — installing it"
+            pip install -e ".[all]"
+          else
+            pip install -e .
+          fi
+
+      - name: Lint
+        run: |
+          pip install ruff --quiet
+          ruff check . --select E,F,W --ignore E501
+
+      - name: Import check
+        run: python -c "import stapel_analytics; print('import OK')"
+
+      - name: Migration state matches the models
+        # A model change that never produced a migration is a deployment
+        # that boots and then cannot write.
+        run: python manage.py makemigrations --check --dry-run
+
+      - name: Outbox discipline
+        # An emit that is not inside the mutating transaction, or one whose
+        # failure is swallowed, is a row that exists without the fact it
+        # announced (categories C1 / listings L2).
+        run: python -m stapel_core.lint.emit_check .
+
+      - name: Install test dependencies
+        run: pip install pytest pytest-django pytest-cov
+
+      - name: Tests with coverage
+        run: |
+          pytest tests/ \
+            --cov=stapel_analytics \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --junitxml=junit.xml \
+            -o junit_family=legacy \
+            -v
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        with:
+          files: coverage.xml
+          flags: stapel-analytics
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Upload test results to Codecov
+        uses: codecov/test-results-action@v1
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}

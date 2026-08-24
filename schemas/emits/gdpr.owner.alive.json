@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gdpr.owner.alive",
+  "description": "Answer to gdpr.owner.probe. Subscribed by stapel_core.gdpr.register_gdpr_owner from stapel_analytics.apps \u2014 the same registration that consumes gdpr.erasure.requested, so the answer proves the erasure path is consumed, not that a container is deployed. subject_types is what this owner claims: account and anon.",
+  "type": "object",
+  "required": [
+    "owner"
+  ],
+  "properties": {
+    "owner": {
+      "type": "string"
+    },
+    "subject_types": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "correlation_id": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false
+}
