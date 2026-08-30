@@ -6,6 +6,72 @@ Pre-1.0 semver: **minor = breaking**, patch = compatible.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-08-30
+
+### Fixed — a merge is not a delete: the guest's funnels follow the survivor
+
+This module knew half of an account's life cycle. `user.deleted` was
+answered from the first release; `user.merged` — stapel-auth folding an
+anonymous guest into an existing account when the guest signs in — was not
+answered at all, and silence there is not neutrality, it is a wrong answer
+given quietly.
+
+`stapel_analytics.actions.handle_user_merged` now re-owns `Funnel.owner_id`
+onto the surviving account. Without it the survivor gets **403 on a funnel
+they authored as a guest**: `owner_id` keeps pointing at an id that can no
+longer sign in, and the API reads an unowned funnel as an operator's object
+rather than a user's. Idempotent, and a malformed or missing id is logged and
+dropped rather than raised — an escaping exception is a poison pill the bus
+would replay forever, and `UUIDField` raises `ValidationError`, which is not
+a `ValueError`.
+
+### Not done, and why — the event stream is not re-keyed
+
+The interesting half of this module's merge, written down instead of left to
+be discovered.
+
+**The pseudonymisation is not the blocker.** `privacy.hash_user_id` is a
+FORWARD hash and `user.merged` carries both raw ids, so
+`hash_user_id(from_user_id)` and `hash_user_id(into_user_id)` are both
+computable inside the handler, salt or no salt. Nothing about the hashing
+stops a merge, and saying otherwise would be an excuse rather than a reason.
+
+**The storage seam is.** Analytics owns no event table; rows live in
+`stapel_core.eventstore`, whose contract is append / query / rollup / purge
+with **no update**. A re-key would therefore have to be read-all,
+append-under-the-new-hash, purge-the-old — three calls with no transaction
+spanning them, driven by an at-least-once handler. Interrupted between the
+append and the purge it counts one person's history TWICE, in a store whose
+whole job is arithmetic; and a deployment that routed the `analytics` stream
+elsewhere may refuse a filtered purge outright (`PurgeFiltersUnsupported`). A
+silent double-count is worse than a documented gap, so this release does not
+attempt it.
+
+**What the gap costs**: the guest's pre-merge rows keep their own
+`user_hash`, so a funnel sees them as a second subject, and a later erasure
+of the survivor does not reach them *by hash*. It reaches some of them by the
+anon linkage — `erasure.linked_anon_ids` collects the anonymous ids seen
+beside the survivor's hash, and a guest promoted in the same browser shares
+one — but that is a side effect of same-device promotion, not a guarantee,
+and it must not be read as one.
+
+Closing it needs an **atomic subject re-key in `stapel_core.eventstore`**,
+which is where the primitive belongs: every library metering through that
+seam has the same hole. Filed as follow-up 6 in MODULE.md §10, and pinned by
+`tests/test_user_merged.py::TestTheEventStreamIsNotReKeyed` so closing it is
+a deliberate edit.
+
+### Changed — `stapel-core>=0.52.1`
+
+Core 0.52.1 adds the `stapel_core.lifecycle.E001` system check (tag
+`stapel_lifecycle`): an app that subscribes `user.deleted` and not
+`user.merged` is a boot-time ERROR. This module's `user.deleted` subscriber
+is a closure core registers on its behalf from `register_gdpr_owner`, and
+core stamps it with this module's name so the pair is charged here rather
+than to core — which is exactly what `tests/test_user_merged.py::
+TestSubscription::test_the_lifecycle_pair_check_is_green` asserts. The floor
+is raised so that gate can never be skipped for want of the check.
+
 ## [0.1.0] — 2026-08-24
 
 First release. The backend half of the analytics standard

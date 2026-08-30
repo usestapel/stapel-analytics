@@ -348,6 +348,39 @@ same release as the ingest.
   `analytics.W005` accepts either this horizon or the event store's own
   per-stream `RETENTION`.
 
+- **A merge is not a delete** (`actions.handle_user_merged`, `user.merged`
+  from stapel-auth). A guest account absorbed into an existing one on
+  sign-in is the other half of an account's life cycle, and an app that
+  answers only `user.deleted` has a silent wrong answer for it
+  (`stapel_core.lifecycle.E001`). This module re-owns `Funnel.owner_id` onto
+  the survivor — otherwise the survivor gets 403 on a funnel they authored
+  as a guest, because an unowned funnel reads as an operator's object.
+
+  **The event stream is deliberately NOT re-keyed, and the reason is not the
+  pseudonymisation.** `hash_user_id` is a FORWARD hash and the payload
+  carries both raw ids, so both hashes are computable in the handler without
+  reversing anything. What stops the re-key is the storage seam:
+  `stapel_core.eventstore` is append / query / rollup / purge with **no
+  update**, so a re-key would be read-all, append-under-the-new-hash,
+  purge-the-old — three calls with no transaction spanning them, driven by an
+  at-least-once handler. Interrupted between the append and the purge it
+  counts one person's history TWICE, in a store whose whole job is
+  arithmetic, and a routed backend may refuse a filtered purge outright
+  (`PurgeFiltersUnsupported`). A silent double-count is worse than a
+  documented gap.
+
+  The gap, stated rather than left to be discovered: the guest's pre-merge
+  rows keep their own `user_hash`, so a funnel sees them as a second subject
+  and a later erasure of the survivor does not reach them **by hash**. It
+  reaches some of them by the anon linkage (`erasure.linked_anon_ids`
+  collects the anonymous ids seen beside the survivor's hash, and a guest
+  promoted in the same browser shares one) — a side effect of same-device
+  promotion, not a guarantee, and it must not be read as one. Closing this
+  needs an atomic subject re-key in `stapel_core.eventstore`, which is where
+  the primitive belongs: every consumer of that seam has the same problem.
+  `tests/test_user_merged.py::TestTheEventStreamIsNotReKeyed` pins the gap so
+  closing it is a deliberate edit. Filed as follow-up 6 in §10.
+
 Declare the owner in the host:
 
 ```python
@@ -473,7 +506,8 @@ CODE, so they are never readable from an environment variable.
 receipts `gdpr.section.erased` / `gdpr.owner.alive`.
 **Consumes** (`schemas/consumes/`, documentation only — `autoload_schemas`
 registers `emits/` and `functions/`): `gdpr.erasure.requested`,
-`gdpr.owner.probe`, `user.deleted`, plus whatever `COMM_BRIDGE` names.
+`gdpr.owner.probe`, `user.deleted`, `user.merged`, plus whatever
+`COMM_BRIDGE` names.
 
 **Commands**: `analytics_event_registry`, `analytics_funnel_report`,
 `analytics_fanout`, `purge_analytics`.
@@ -496,3 +530,9 @@ registers `emits/` and `functions/`): `gdpr.erasure.requested`,
    and slow on a large Postgres stream. The scale-out answer is the event
    store's own (`STAPEL_EVENTSTORE["ROUTES"]` to a column-store backend),
    not a schema here.
+6. `stapel_core.eventstore` needs an **atomic subject re-key** (§7). Without
+   it a `user.merged` cannot move a guest's stored history onto the surviving
+   account without risking a double-count, so the merge carries funnels only
+   and the stream keeps two subject keys for one person. The primitive
+   belongs in core: every library that meters through that seam has the same
+   hole.

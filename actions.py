@@ -11,6 +11,9 @@ Two consumers live here, and they are different in kind:
   a call inside ``record_batch`` for one reason: the browser that sent the
   batch must not pay for a vendor's socket (design §3: delivery goes through
   the outbox, never inline).
+- **the account life cycle** — ``user.merged`` (from stapel-auth). A guest
+  absorbed into an existing account takes their funnels with them; what the
+  event stream can and cannot do about it is spelled out on the handler.
 - **the comm bridge** — ``STAPEL_ANALYTICS["COMM_BRIDGE"]`` maps a HOST's
   Actions to analytics event names, so a payment, an email, a webhook
   delivery becomes a step of the same funnels as the clicks that led to it
@@ -206,9 +209,95 @@ def reset_comm_bridge() -> None:
     _BRIDGE.clear()
 
 
+# ─── account life cycle ───────────────────────────────────────────────
+
+
+@on_action("user.merged")
+def handle_user_merged(event):
+    """An anonymous guest was absorbed into an existing account.
+
+    Re-points the one per-user column this module owns:
+
+    * :class:`~stapel_analytics.models.Funnel` — ``owner_id``. Plain rewrite;
+      the funnel's uniqueness is on ``slug``, deployment-wide, so nothing is
+      scoped to the owner and no dedup is needed. Without this the survivor
+      gets 403 on a funnel they authored as a guest: the API treats an
+      unowned funnel as an operator's object, not a user's.
+
+    **The event stream is deliberately NOT re-keyed, and this is the honest
+    reason.** It is not the pseudonymisation: ``privacy.hash_user_id`` is a
+    FORWARD hash and ``user.merged`` hands over both raw ids, so
+    ``hash_user_id(from_user_id)`` and ``hash_user_id(into_user_id)`` are
+    both computable here without reversing anything, salt or no salt. Nothing
+    about the hashing stops a merge.
+
+    What stops it is the storage seam. Analytics owns no event table; rows
+    live in ``stapel_core.eventstore``, whose ``EventStore`` contract is
+    append / query / rollup / purge and has **no update**. A re-key would
+    therefore have to be read-all, append-under-the-new-hash, purge-the-old —
+    three calls with no transaction spanning them, driven by an at-least-once
+    handler. A crash between the append and the purge leaves the guest's
+    entire history counted TWICE, under both hashes, in a store whose whole
+    job is arithmetic; and a deployment that routed the ``analytics`` stream
+    to another backend may not even accept a filtered purge
+    (``eventstore.PurgeFiltersUnsupported``). A silent double-count is worse
+    than a documented gap, so this handler does not attempt it.
+
+    The gap it leaves, stated plainly rather than left for someone to
+    discover: the guest's pre-merge rows keep their own ``user_hash``, so a
+    funnel sees them as a second subject, and a later erasure of the survivor
+    does not reach them by hash. It reaches some of them by the anon linkage
+    (``erasure.linked_anon_ids`` collects the anonymous ids seen beside the
+    survivor's hash, and a guest promoted in the same browser shares one) —
+    but that is a side effect of same-device promotion, not a guarantee, and
+    it must not be read as one. Closing this properly needs an atomic subject
+    re-key in ``stapel_core.eventstore``, which is where the primitive
+    belongs: every consumer of that seam has the same problem.
+
+    Idempotent: a redelivery finds no funnel under the guest's id and does
+    nothing. A malformed or missing id is logged and dropped rather than
+    raised — an escaping exception is a poison pill the bus would replay
+    forever, and Django's ``UUIDField`` raises ``ValidationError``, which is
+    not a ``ValueError``.
+    """
+    from django.core.exceptions import ValidationError
+    from django.db import transaction
+
+    from .models import Funnel
+
+    payload = event.payload or {}
+    from_user_id = payload.get("from_user_id")
+    into_user_id = payload.get("into_user_id")
+    if not from_user_id or not into_user_id:
+        logger.error("user.merged without from/into user id: %s", event.event_id)
+        return
+    if str(from_user_id) == str(into_user_id):
+        return
+
+    try:
+        with transaction.atomic():
+            moved = Funnel.objects.filter(owner_id=from_user_id).update(
+                owner_id=into_user_id
+            )
+    except (ValidationError, ValueError, TypeError):
+        # An id that cannot address a row here names nothing to carry over.
+        logger.warning("user.merged with unusable user ids: %s", event.event_id)
+        return
+    if moved:
+        logger.info(
+            "user.merged %s -> %s: %s funnel(s) re-owned; the event stream "
+            "keeps the guest's own user_hash (no re-key primitive in "
+            "stapel_core.eventstore)",
+            from_user_id,
+            into_user_id,
+            moved,
+        )
+
+
 __all__ = [
     "bridged_actions",
     "handle_events_recorded",
+    "handle_user_merged",
     "reset_comm_bridge",
     "wire_comm_bridge",
 ]
