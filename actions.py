@@ -216,7 +216,8 @@ def reset_comm_bridge() -> None:
 def handle_user_merged(event):
     """An anonymous guest was absorbed into an existing account.
 
-    Re-points the one per-user column this module owns:
+    Two things carry over, and they are separate mechanisms because they live
+    in separate stores:
 
     * :class:`~stapel_analytics.models.Funnel` — ``owner_id``. Plain rewrite;
       the funnel's uniqueness is on ``slug``, deployment-wide, so nothing is
@@ -224,46 +225,50 @@ def handle_user_merged(event):
       gets 403 on a funnel they authored as a guest: the API treats an
       unowned funnel as an operator's object, not a user's.
 
-    **The event stream is deliberately NOT re-keyed, and this is the honest
-    reason.** It is not the pseudonymisation: ``privacy.hash_user_id`` is a
-    FORWARD hash and ``user.merged`` hands over both raw ids, so
-    ``hash_user_id(from_user_id)`` and ``hash_user_id(into_user_id)`` are
-    both computable here without reversing anything, salt or no salt. Nothing
-    about the hashing stops a merge.
+    * **The event stream** — every row's ``user_hash``, through
+      :func:`store.rekey_subject`. ``privacy.hash_user_id`` is a FORWARD
+      hash and ``user.merged`` hands over both raw ids, so both hashes are
+      computable here; what used to block this was the storage seam, not the
+      pseudonymisation. ``stapel_core.eventstore`` gained ``rekey()`` in
+      0.54.0 — atomic, idempotent, and silent — so the guest's history now
+      becomes the survivor's in one call instead of the read-append-purge
+      sequence that counts it twice when interrupted. That sequence is why
+      0.2.0 shipped this gap open on purpose; the primitive is what closed it.
 
-    What stops it is the storage seam. Analytics owns no event table; rows
-    live in ``stapel_core.eventstore``, whose ``EventStore`` contract is
-    append / query / rollup / purge and has **no update**. A re-key would
-    therefore have to be read-all, append-under-the-new-hash, purge-the-old —
-    three calls with no transaction spanning them, driven by an at-least-once
-    handler. A crash between the append and the purge leaves the guest's
-    entire history counted TWICE, under both hashes, in a store whose whole
-    job is arithmetic; and a deployment that routed the ``analytics`` stream
-    to another backend may not even accept a filtered purge
-    (``eventstore.PurgeFiltersUnsupported``). A silent double-count is worse
-    than a documented gap, so this handler does not attempt it.
+    The two writes are **not** in one transaction, and cannot be: the funnel
+    row is in the platform database and the stream may be routed to another
+    engine entirely (``STAPEL_EVENTSTORE["ROUTES"]``). They do not need to be.
+    Both halves are idempotent, so a redelivery after a partial success
+    finishes the job — the funnel update finds nothing left to move, the
+    re-key finds no row under the guest's hash, and both return 0.
 
-    The gap it leaves, stated plainly rather than left for someone to
-    discover: the guest's pre-merge rows keep their own ``user_hash``, so a
-    funnel sees them as a second subject, and a later erasure of the survivor
-    does not reach them by hash. It reaches some of them by the anon linkage
-    (``erasure.linked_anon_ids`` collects the anonymous ids seen beside the
-    survivor's hash, and a guest promoted in the same browser shares one) —
-    but that is a side effect of same-device promotion, not a guarantee, and
-    it must not be read as one. Closing this properly needs an atomic subject
-    re-key in ``stapel_core.eventstore``, which is where the primitive
-    belongs: every consumer of that seam has the same problem.
+    Order is deliberate: the stream first. It is the half that can fail for a
+    reason outside this deployment's control (a routed backend that predates
+    the primitive raises ``RekeyUnsupported``), and failing before the funnel
+    move leaves the whole merge visibly unfinished for the redelivery rather
+    than half-applied with nothing to show it.
 
-    Idempotent: a redelivery finds no funnel under the guest's id and does
-    nothing. A malformed or missing id is logged and dropped rather than
-    raised — an escaping exception is a poison pill the bus would replay
-    forever, and Django's ``UUIDField`` raises ``ValidationError``, which is
-    not a ``ValueError``.
+    A backend that cannot re-key is logged as an error and the funnel half
+    still runs — the alternative is refusing to re-parent the funnel too,
+    which fixes nothing and adds a 403. It is not raised: an escaping
+    exception is a poison pill the bus would replay forever, and the
+    condition is a deployment's storage choice, not a transient fault.
+
+    Idempotent throughout. A malformed or missing id is logged and dropped
+    rather than raised — Django's ``UUIDField`` raises ``ValidationError``,
+    which is not a ``ValueError``.
     """
     from django.core.exceptions import ValidationError
     from django.db import transaction
 
+    from . import store
     from .models import Funnel
+    from .privacy import hash_user_id
+
+    # Through the seam, never `from stapel_core.eventstore import ...`: the
+    # store API lives in exactly one file of this package, and naming the
+    # exception here would be the second (tests/test_store.py pins it).
+    RekeyUnsupported = store.RekeyUnsupported
 
     payload = event.payload or {}
     from_user_id = payload.get("from_user_id")
@@ -274,6 +279,26 @@ def handle_user_merged(event):
     if str(from_user_id) == str(into_user_id):
         return
 
+    rekeyed = 0
+    try:
+        rekeyed = store.rekey_subject(
+            from_user_hash=hash_user_id(from_user_id),
+            to_user_hash=hash_user_id(into_user_id),
+        )
+    except RekeyUnsupported:
+        # A routed backend that predates the primitive. Say so loudly and
+        # keep going: the funnel half is still worth doing, and refusing it
+        # would add a 403 to a stream that is already going to be split.
+        logger.error(
+            "user.merged %s -> %s: the analytics stream is routed to a "
+            "backend that cannot re-key, so the guest's rows keep their own "
+            "user_hash and a funnel will count them as a second subject "
+            "(event %s)",
+            from_user_id,
+            into_user_id,
+            event.event_id,
+        )
+
     try:
         with transaction.atomic():
             moved = Funnel.objects.filter(owner_id=from_user_id).update(
@@ -283,14 +308,14 @@ def handle_user_merged(event):
         # An id that cannot address a row here names nothing to carry over.
         logger.warning("user.merged with unusable user ids: %s", event.event_id)
         return
-    if moved:
+    if moved or rekeyed:
         logger.info(
-            "user.merged %s -> %s: %s funnel(s) re-owned; the event stream "
-            "keeps the guest's own user_hash (no re-key primitive in "
-            "stapel_core.eventstore)",
+            "user.merged %s -> %s: %s funnel(s) re-owned, %s event row(s) "
+            "re-keyed onto the survivor",
             from_user_id,
             into_user_id,
             moved,
+            rekeyed,
         )
 
 

@@ -5,9 +5,10 @@ then deletes the guest row. This module answered ``user.deleted`` from its
 first release and said nothing about ``user.merged``, and silence there is
 not neutrality — it is a wrong answer given quietly.
 
-What this module can carry over, it carries: ``Funnel.owner_id``. What it
-cannot, it says out loud, and the last class here pins the gap so that
-closing it later is a deliberate edit rather than a surprise.
+Both halves of what this module owns carry over: ``Funnel.owner_id`` in the
+platform database, and every event row's ``user_hash`` in the store, through
+``eventstore.rekey`` (core 0.54.0). The stream half used to be a documented
+gap pinned by a test; that test is now the assertion that it is closed.
 """
 import uuid
 from types import SimpleNamespace
@@ -129,27 +130,28 @@ class TestPoisonPayloads:
 
 
 @pytest.mark.django_db
-class TestTheEventStreamIsNotReKeyed:
-    """The documented gap, pinned so closing it is a deliberate edit.
+class TestTheEventStreamFollowsTheSurvivor:
+    """The gap 0.2.0 documented, now closed.
 
-    The pseudonymisation is not what stops a re-key: ``hash_user_id`` is a
-    forward hash and the payload carries both raw ids, so both hashes are
-    computable here. What stops it is that ``stapel_core.eventstore`` has no
-    update — a re-key would be read, append-under-the-new-hash, purge-the-old,
-    three calls with no transaction spanning them, driven by an at-least-once
-    handler. Interrupted between the append and the purge it counts one
-    person's history twice, in a store whose whole job is arithmetic.
+    This class used to be ``TestTheEventStreamIsNotReKeyed`` and asserted the
+    opposite: the guest's rows kept their own ``user_hash`` because
+    ``stapel_core.eventstore`` had no update, and the only way to re-parent
+    them was read, append-under-the-new-hash, purge-the-old — three calls
+    with no transaction across them, which under at-least-once delivery
+    counts one person's history twice, permanently. The pin said that if core
+    ever grew an atomic subject re-key, this class is what has to change.
 
-    So the guest's rows keep their own ``user_hash``. If a future release
-    adds an atomic subject re-key to core, this class is what has to change,
-    and changing it is the moment somebody re-reads the reasoning.
+    Core 0.54.0 grew it. So the assertions are inverted, and the one that did
+    not need inverting — that no row is ever duplicated — stays exactly as it
+    was, because it was never a statement about the gap. It was the property
+    the gap existed to protect, and it still holds now that the gap is shut.
     """
 
     @pytest.fixture(autouse=True)
     def _declared(self, settings):
         settings.STAPEL_ANALYTICS = {"EVENTS": {"a.b": {"description": "x"}}}
 
-    def test_the_guests_rows_keep_their_own_subject_key(self):
+    def test_the_guests_rows_become_the_survivors(self):
         services.track("a.b", {"k": 1}, user_id=GUEST)
         services.track("a.b", {"k": 2}, user_id=SURVIVOR)
 
@@ -157,11 +159,12 @@ class TestTheEventStreamIsNotReKeyed:
 
         guest_hash = hash_user_id(GUEST)
         survivor_hash = hash_user_id(SURVIVOR)
-        assert len(list(iter_events(filters={"user_hash": guest_hash}))) == 1
-        assert len(list(iter_events(filters={"user_hash": survivor_hash}))) == 1
+        assert list(iter_events(filters={"user_hash": guest_hash})) == []
+        survived = list(iter_events(filters={"user_hash": survivor_hash}))
+        assert sorted(e["props"]["k"] for e in survived) == [1, 2]
 
     def test_no_row_is_duplicated_by_the_merge(self):
-        """The failure the missing re-key exists to avoid, asserted directly."""
+        """The property the gap existed to protect. Unchanged, still true."""
         services.track("a.b", {"k": 1}, user_id=GUEST)
         before = len(list(iter_events()))
 
@@ -169,3 +172,105 @@ class TestTheEventStreamIsNotReKeyed:
         handle_user_merged(_event(from_user_id=GUEST, into_user_id=SURVIVOR))
 
         assert len(list(iter_events())) == before
+
+    def test_a_redelivered_merge_moves_nothing_the_second_time(self):
+        services.track("a.b", {"k": 1}, user_id=GUEST)
+
+        handle_user_merged(_event(from_user_id=GUEST, into_user_id=SURVIVOR))
+        handle_user_merged(_event(from_user_id=GUEST, into_user_id=SURVIVOR))
+
+        rows = list(iter_events(filters={"user_hash": hash_user_id(SURVIVOR)}))
+        assert len(rows) == 1
+
+    def test_a_third_partys_rows_are_untouched(self):
+        other = str(uuid.uuid4())
+        services.track("a.b", {"k": 1}, user_id=GUEST)
+        services.track("a.b", {"k": 9}, user_id=other)
+
+        handle_user_merged(_event(from_user_id=GUEST, into_user_id=SURVIVOR))
+
+        kept = list(iter_events(filters={"user_hash": hash_user_id(other)}))
+        assert [e["props"]["k"] for e in kept] == [9]
+
+    def test_the_rest_of_the_row_survives_the_re_key(self):
+        """A re-key moves the subject key and nothing else."""
+        services.track("a.b", {"k": 1}, user_id=GUEST, anon_id="anon-1",
+                       session_id="sess-1")
+
+        handle_user_merged(_event(from_user_id=GUEST, into_user_id=SURVIVOR))
+
+        (row,) = list(iter_events(filters={"user_hash": hash_user_id(SURVIVOR)}))
+        assert row["anon_id"] == "anon-1"
+        assert row["session_id"] == "sess-1"
+        assert row["name"] == "a.b"
+        assert row["props"] == {"k": 1}
+
+    def test_a_self_merge_moves_nothing(self):
+        services.track("a.b", {"k": 1}, user_id=GUEST)
+
+        handle_user_merged(_event(from_user_id=GUEST, into_user_id=GUEST))
+
+        rows = list(iter_events(filters={"user_hash": hash_user_id(GUEST)}))
+        assert len(rows) == 1
+
+    def test_the_re_key_appends_no_row_of_its_own(self):
+        """Silent by contract — a merge is not an analytics event."""
+        services.track("a.b", {"k": 1}, user_id=GUEST)
+        before = len(list(iter_events()))
+
+        handle_user_merged(_event(from_user_id=GUEST, into_user_id=SURVIVOR))
+
+        assert len(list(iter_events())) == before
+
+
+@pytest.mark.django_db
+class TestAStoreThatCannotReKey:
+    """A deployment that routed the stream to a backend without ``rekey``.
+
+    The funnel half is still worth doing, so it runs; the stream half is
+    reported at ERROR rather than raised. Raising would be a poison pill the
+    bus replays forever over a condition that is a storage choice, not a
+    transient fault.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _declared(self, settings):
+        settings.STAPEL_ANALYTICS = {"EVENTS": {"a.b": {"description": "x"}}}
+
+    def test_the_funnel_still_moves_and_the_gap_is_logged(self, caplog):
+        from stapel_core.eventstore import RekeyUnsupported
+
+        mine = _funnel(GUEST, "guest-funnel-norekey")
+
+        def _refuse(**kwargs):
+            raise RekeyUnsupported("routed backend cannot re-key")
+
+        import stapel_analytics.store as store_module
+
+        original = store_module.rekey_subject
+        store_module.rekey_subject = _refuse
+        try:
+            with caplog.at_level("ERROR"):
+                handle_user_merged(
+                    _event(from_user_id=GUEST, into_user_id=SURVIVOR)
+                )
+        finally:
+            store_module.rekey_subject = original
+
+        assert str(Funnel.objects.get(pk=mine.pk).owner_id) == SURVIVOR
+        assert "cannot re-key" in caplog.text
+
+    def test_it_does_not_raise_into_the_bus(self):
+        from stapel_core.eventstore import RekeyUnsupported
+
+        def _refuse(**kwargs):
+            raise RekeyUnsupported("routed backend cannot re-key")
+
+        import stapel_analytics.store as store_module
+
+        original = store_module.rekey_subject
+        store_module.rekey_subject = _refuse
+        try:
+            handle_user_merged(_event(from_user_id=GUEST, into_user_id=SURVIVOR))
+        finally:
+            store_module.rekey_subject = original

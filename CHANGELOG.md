@@ -4,7 +4,67 @@ All notable changes to stapel-analytics are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Pre-1.0 semver: **minor = breaking**, patch = compatible.
 
-## [Unreleased]
+## [0.3.0] — 2026-09-02
+
+Minor (pre-1.0: minor = breaking, patch = compatible). The floor moves to
+stapel-core **0.54.0** — the release is a use of a primitive that does not
+exist below it.
+
+### The gap 0.2.0 documented is closed
+
+0.2.0 shipped `user.merged` carrying `Funnel.owner_id` and deliberately NOT
+re-keying the event stream, with the reasoning written out in three places and
+pinned by `TestTheEventStreamIsNotReKeyed`. The reason was never the
+pseudonymisation — `hash_user_id` is a forward hash and the payload carries
+both raw ids, so both hashes were always computable in the handler. The reason
+was the storage seam: `stapel_core.eventstore` was append / query / rollup /
+purge with **no update**, so a re-key meant read-all,
+append-under-the-new-hash, purge-the-old — three calls with no transaction
+across them, run by an at-least-once handler. Interrupted between the append
+and the purge, that counts one person's history twice, permanently, in rows
+whose only purpose is to be counted.
+
+Core 0.54.0 added `eventstore.rekey()`: atomic, idempotent, silent. So:
+
+### `user.merged` now moves both halves
+
+- `Funnel.owner_id` → the survivor, as before.
+- **Every event row's `user_hash`** → the survivor, via the new
+  `store.rekey_subject()`. One call, all-or-nothing, and a redelivery moves 0
+  the second time because nothing reads the guest's hash any more.
+
+The two writes are **not** in one transaction and cannot be: the funnel lives
+in the platform database, the stream may be routed to another engine entirely
+(`STAPEL_EVENTSTORE["ROUTES"]`). They do not need to be — both halves are
+idempotent, so a redelivery after a partial success finishes the job. The
+stream half runs first, deliberately: it is the half that can fail for a
+reason outside this deployment's control, and failing before the funnel move
+leaves the merge visibly unfinished for the redelivery rather than
+half-applied with nothing to show it.
+
+### A routed backend that cannot re-key is loud, not fatal
+
+`RekeyUnsupported` is logged at ERROR, naming both ids and the consequence,
+and the funnel half still runs. It is not raised: an escaping exception is a
+poison pill the bus replays forever, and the condition is a deployment's
+storage choice, not a transient fault. Refusing the funnel move as well would
+fix nothing and add a 403. The residue in that deployment is exactly the old
+gap, and now it says so at ERROR instead of in a docstring.
+
+### Changed
+
+- `store.rekey_subject(*, from_user_hash, to_user_hash) -> int` — new, and
+  the only way this package re-keys. The store API still lives in exactly one
+  file: `store.RekeyUnsupported` re-exports the exception type lazily so
+  `actions.py` never imports `stapel_core.eventstore` itself
+  (`tests/test_store.py::TestSeamIsolation` is what enforces that, and it
+  caught the first draft of this change).
+- `TestTheEventStreamIsNotReKeyed` → `TestTheEventStreamFollowsTheSurvivor`,
+  assertions inverted. `test_no_row_is_duplicated_by_the_merge` is unchanged:
+  it was never a statement about the gap, it was the property the gap existed
+  to protect, and it still holds now that the gap is shut. New:
+  `TestAStoreThatCannotReKey` for the degraded path.
+- MODULE.md §10 follow-up 6 closed.
 
 ## [0.2.0] — 2026-08-30
 

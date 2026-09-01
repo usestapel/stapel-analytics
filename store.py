@@ -29,6 +29,32 @@ from typing import Iterable, Iterator, Mapping
 logger = logging.getLogger(__name__)
 
 
+def _rekey_unsupported():
+    """The store's "this backend cannot re-key" type, re-exported.
+
+    A caller has to be able to name the condition to handle it, and naming it
+    by importing ``stapel_core.eventstore`` would put the store API back into
+    a second file — the one thing this module exists to prevent (and the
+    thing ``tests/test_store.py::TestSeamIsolation`` fails on). So the type
+    comes through here, like everything else about the store does.
+    """
+    from stapel_core.eventstore import RekeyUnsupported
+
+    return RekeyUnsupported
+
+
+def __getattr__(name):
+    """Lazy module attribute: ``store.RekeyUnsupported``.
+
+    Lazy because importing the store API at module import time would make
+    this package require Django's settings to be configured just to be
+    imported, which ``append``/``query``/``purge`` all deliberately avoid.
+    """
+    if name == "RekeyUnsupported":
+        return _rekey_unsupported()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 def stream_name() -> str:
     """The event-store stream every analytics row is appended to."""
     from .conf import analytics_settings
@@ -138,6 +164,34 @@ def purge(
     from stapel_core import eventstore
 
     return eventstore.purge(stream_name(), older_than=older_than, filters=filters)
+
+
+def rekey_subject(*, from_user_hash: str, to_user_hash: str) -> int:
+    """Move one subject's whole history onto another subject key.
+
+    The merge half of the identity story. ``erasure`` answers "forget this
+    person"; this answers "these two hashes are one person" — a guest
+    absorbed into the account it just proved it owns.
+
+    One call, atomic in the store, idempotent under redelivery, and it
+    appends nothing: see ``eventstore.rekey``. What it replaces — read-all,
+    re-append under the new hash, purge the old — is three calls with no
+    transaction across them, which under at-least-once delivery counts the
+    moved history twice, permanently, in rows whose only purpose is to be
+    counted.
+
+    Raises :data:`RekeyUnsupported` if the deployment routed the analytics
+    stream to a backend that cannot re-key; the caller decides what that
+    means, exactly as it does for ``PurgeFiltersUnsupported``.
+    """
+    from stapel_core import eventstore
+
+    return eventstore.rekey(
+        stream_name(),
+        field="user_hash",
+        from_value=from_user_hash,
+        to_value=to_user_hash,
+    )
 
 
 def uses_default_backend() -> bool:
