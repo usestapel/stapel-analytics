@@ -4,20 +4,31 @@ All notable changes to stapel-analytics are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Pre-1.0 semver: **minor = breaking**, patch = compatible.
 
+## [0.3.2] — 2026-09-02
+
+Patch. Corrects what 0.3.1 said. The floor itself stays at
+`stapel-core>=0.54.1` — for a different, real reason.
+
+**0.3.1's changelog was wrong.** It claimed stapel-core 0.51.0–0.53.0 shipped
+wheels missing `stapel_core.django.sites`. The published wheels were checked
+afterwards and all of them contain the module; nothing on PyPI was ever
+broken. What actually happened is that core's main briefly carried a
+`pyproject.toml` whose `[tool.setuptools] packages` list had lost that line to
+a rebase conflict resolution — tagged core 0.54.0, caught by core's own CI,
+never published, fixed in 0.54.1. Siblings whose CI builds core from git main
+rather than PyPI failed at `django.setup()` while it was there.
+
+**The floor is still right, and 0.3.0 stated it wrong.** 0.3.0 declared
+`>=0.54.0` because that is the release that added `eventstore.rekey`, which
+this module now depends on. 0.54.0 was never published, so the first core on
+PyPI carrying the primitive is **0.54.1** — which is what a floor should
+name. A floor pointing at a version that does not exist is satisfiable by
+accident (pip resolves the next one up) rather than by statement.
+
 ## [0.3.1] — 2026-09-02
 
-Patch. `stapel-core>=0.54.1` — a floor that has to exclude, not just include.
-
-stapel-core 0.51.0 through 0.53.0 shipped wheels missing
-`stapel_core.django.sites`: the subpackage was never added to core's explicit
-`[tool.setuptools] packages` list, so it was tracked in git, importable from a
-checkout, present in an editable install — and absent from the artifact on
-PyPI. `stapel_core.django.apps.ready()` imports it unconditionally, so **any**
-Django app that resolves one of those three releases dies at
-`django.setup()`. The previous floor here admitted all three.
-
-Core 0.54.1 restores the line; this raises the floor past the versions that
-cannot work. No code change.
+Patch. Raised `stapel-core` to `>=0.54.1`. **Superseded by 0.3.2 — the floor
+is correct, the stated reason was not; see that entry.**
 
 ## [0.3.0] — 2026-09-02
 
