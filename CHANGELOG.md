@@ -4,6 +4,21 @@ All notable changes to stapel-analytics are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Pre-1.0 semver: **minor = breaking**, patch = compatible.
 
+## [0.3.1] — 2026-09-02
+
+Patch. `stapel-core>=0.54.1` — a floor that has to exclude, not just include.
+
+stapel-core 0.51.0 through 0.53.0 shipped wheels missing
+`stapel_core.django.sites`: the subpackage was never added to core's explicit
+`[tool.setuptools] packages` list, so it was tracked in git, importable from a
+checkout, present in an editable install — and absent from the artifact on
+PyPI. `stapel_core.django.apps.ready()` imports it unconditionally, so **any**
+Django app that resolves one of those three releases dies at
+`django.setup()`. The previous floor here admitted all three.
+
+Core 0.54.1 restores the line; this raises the floor past the versions that
+cannot work. No code change.
+
 ## [0.3.0] — 2026-09-02
 
 Minor (pre-1.0: minor = breaking, patch = compatible). The floor moves to
