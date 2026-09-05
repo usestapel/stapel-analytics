@@ -11,12 +11,26 @@ from django.urls import path
 
 from .errors import AnalyticsErrorKeysView
 from .views import (
+    ConversionFeedView,
     EventRegistryView,
     EventsReportView,
     FunnelDetailView,
     FunnelListCreateView,
     FunnelReportView,
     IngestView,
+)
+
+#: The conversion feed, alone. Its own tuple because it is the one block a
+#: host may want WITHOUT the rest: a deployment that mounts this module only
+#: to hand an ad platform a file has no collector, no funnels and no reports
+#: to expose, and mounting them anyway would put an anonymous ingest route
+#: on a service that never wanted one. ``urls_feed.py`` is that mount.
+FEED_PATTERNS = (
+    path(
+        "conversions/google-ads.csv",
+        ConversionFeedView.as_view(),
+        name="analytics-conversion-feed",
+    ),
 )
 
 urlpatterns = [
@@ -34,6 +48,7 @@ urlpatterns = [
     path("reports/events", EventsReportView.as_view(), name="analytics-events-report"),
     # The listing the stapel-translate error collector reads.
     path("error-keys/", AnalyticsErrorKeysView.as_view(), name="analytics-error-keys"),
+    *FEED_PATTERNS,
 ]
 
 
@@ -54,5 +69,12 @@ class GateEntry(NamedTuple):
 #: emitter has a uniform mechanism.
 GATE_REGISTRY: dict = {
     "analytics.ingest": GateEntry("analytics.ingest", (), (urlpatterns[0],)),
-    "analytics.api": GateEntry("analytics.api", (), tuple(urlpatterns[1:])),
+    "analytics.api": GateEntry(
+        "analytics.api", (), tuple(urlpatterns[1:-len(FEED_PATTERNS)])
+    ),
+    # Its own gate, and off unless a token is configured: the feed is the
+    # only route here that answers a caller holding nothing but a secret.
+    "analytics.conversion_feed": GateEntry(
+        "analytics.conversion_feed", (), FEED_PATTERNS
+    ),
 }

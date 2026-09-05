@@ -19,7 +19,8 @@ Three kinds of key live here, and the difference matters:
   environment (``stapel_core.conf``: a name that decides which code runs is
   not read from a variable anything in the pod can set).
 - **Plain values** — retention, caps, modes.
-- **Secrets** — the ``GOOGLE_ADS_*`` credentials (``conversions.py``).
+- **Secrets** — the ``GOOGLE_ADS_*`` credentials (``conversions.py``) and
+  ``CONVERSION_FEED_TOKEN`` (``feed.py``).
   These are values, not code names, so the environment step stays OPEN for
   them and that is the point: a refresh token belongs in the environment
   (or a vault that populates it), never in a settings file baked into an
@@ -229,6 +230,30 @@ DEFAULTS = {
     # It also sits comfortably above GOOGLE_ADS_RETRY_BASE_SECONDS (300), so
     # the sweep never races a row's own backoff and re-attempts it early.
     "CONVERSION_UPLOAD_SCHEDULE": {"minute": "*/15"},
+
+    # ── The conversion feed (feed.py) ────────────────────────────────
+    # Bearer/query token the feed endpoint demands. A SECRET, so the
+    # environment door stays open for the same reason the credentials
+    # above keep it open — it is a value, not a name that decides which
+    # code runs. EMPTY BY DEFAULT AND THAT DISABLES THE ENDPOINT: a feed
+    # is the outbox readable over HTTP, and a library that shipped it
+    # open would publish one deployment's conversion values to anybody
+    # who guessed the path. Empty = 404, not "open".
+    "CONVERSION_FEED_TOKEN": "",
+    # How far back the feed looks, in days. Larger than the 90-day click
+    # window on purpose: the puller decides its own schedule, and a feed
+    # that dropped a row the moment its own retention said so would make
+    # a missed fetch a permanently lost conversion. Rows are still gated
+    # by the click window (GOOGLE_ADS_CONVERSION_WINDOW_DAYS) — this only
+    # bounds how much history one response carries.
+    "CONVERSION_FEED_WINDOW_DAYS": 120,
+    # The `Conversion Name` column. It must match the conversion action's
+    # DISPLAY NAME in the ads account character for character — the file
+    # import matches on the name, not on the resource name, and a mismatch
+    # is not an error, it is a file that imports zero rows. The default is
+    # a placeholder every deployment is expected to replace;
+    # `analytics.W012` says so when the feed is on and this was not set.
+    "CONVERSION_FEED_CONVERSION_NAME": "Offline conversion",
 
     # ── Seams (dotted paths; never read from the environment) ────────
     # Decides which id a funnel groups by for one event row: user hash,

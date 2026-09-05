@@ -70,10 +70,21 @@ def upload_click_conversions(limit: int = DEFAULT_UPLOAD_LIMIT) -> dict:
     outbox, and it never raises for a row Google refuses — a refusal is
     recorded on the row (``conversions.deliver``), because a scheduled task
     that dies on one bad click id stops delivering the good ones behind it.
+
+    The pass **starts by settling what can never go** — a row whose click
+    has aged past the window is finished, not failing, and leaving it in
+    the queue burns an attempt from its own give-up budget every quarter
+    hour and pushes the reportable rows behind it down the ``--limit``.
+    Those rows are counted under ``expired``, separately from the ones this
+    pass actually tried, because "we ran out of time" and "Google said no"
+    are not the same line in an operator's morning.
     """
     from . import conversions
 
     counts: dict[str, int] = {}
+    expired = conversions.expire_stale()
+    if expired:
+        counts["expired"] = expired
     for row in conversions.due(limit):
         answer = conversions.deliver(row)
         counts[answer["status"]] = counts.get(answer["status"], 0) + 1

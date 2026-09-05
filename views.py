@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import functools
 
+from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import permissions
 from rest_framework.views import APIView
@@ -47,6 +48,7 @@ from . import services
 from .conf import analytics_settings
 from .errors import (
     BATCH_KEYS,
+    ERR_403_FEED_TOKEN,
     ERR_400_BATCH_SHAPE,
     ERR_400_REPORT_PERIOD,
     ERR_403_FORBIDDEN,
@@ -409,7 +411,102 @@ class EventsReportView(SerializerSeamMixin, APIView):
         return StapelResponse(self.get_response_serializer_class()(report_dto))
 
 
+@extend_schema(tags=["Analytics"])
+class ConversionFeedView(SerializerSeamMixin, APIView):
+    """``GET`` the offline click-conversion outbox as a CSV file.
+
+    The pull half of the conversion story: instead of this deployment
+    calling an ad platform's API, the platform's data manager fetches this
+    URL on a schedule it owns. Everything about the response follows from
+    that inversion.
+
+    **It is a file, not an API resource.** ``text/csv`` with the platform's
+    own column headers, no envelope, no pagination — the consumer is an
+    importer reading a template, not a client this module gets to teach a
+    format to. That is also why the errors below are the only JSON it can
+    ever answer with.
+
+    It carries the module's serializer seam like every other view here and
+    leaves both slots empty, because a file has no serializer to swap. The
+    rule stays "every view carries it" rather than "every view except one",
+    which is a rule a reader can check.
+
+    **Authentication is a token, not a session.** There is no user on the
+    far end; there is a scheduler holding a secret. ``AllowAny`` with an
+    EMPTY authenticator list, and the whole gate is
+    :func:`feed.token_matches`:
+
+    - no token configured -> **404**. The feed ships off, and off means the
+      URL does not exist. A 401 here would be an advertisement.
+    - token configured, wrong or absent one presented -> **403**.
+    - a match -> the file, with ``Cache-Control: no-store``.
+
+    ``get_authenticators`` is emptied for the same reason ``IngestView``
+    resolves its own: DRF would otherwise read ``Authorization: Bearer ...``
+    with whatever authenticator the host has configured project-wide and
+    401 the puller before this view ever sees the header it is holding.
+
+    **The read has one side effect, and it is the point.** Serving the file
+    writes a :class:`~stapel_analytics.models.ConversionFeedFetch` receipt,
+    because a pull leaves no other trace that it happened and "has the
+    first load landed" is the question this endpoint exists to make
+    answerable. It also settles rows whose click has aged out
+    (:func:`conversions.expire_stale`) — in a pull-only deployment nothing
+    else ever does, and an outbox that only grows is the failure this
+    module already knows how to have.
+    """
+
+    permission_classes = [permissions.AllowAny]
+
+    def get_authenticators(self):
+        return []
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name="token",
+                description=(
+                    "The feed token, when the caller cannot send an "
+                    "Authorization: Bearer header."
+                ),
+                required=False,
+                type=str,
+            )
+        ],
+        responses={200: OpenApiTypes.STR},
+    )
+    def get(self, request):
+        from django.http import Http404, HttpResponse
+
+        from . import conversions, feed
+
+        if not feed.is_enabled():
+            # Not 403: a deployment that never configured a feed has no
+            # feed, and saying "forbidden" would tell a stranger there is
+            # something here worth getting a token for.
+            raise Http404
+        if not feed.token_matches(feed.presented_token(request)):
+            return StapelErrorResponse(403, ERR_403_FEED_TOKEN)
+
+        conversions.expire_stale()
+        rows = feed.feed_rows()
+        body = feed.render_csv(rows)
+        feed.record_fetch(rows=len(rows), remote=feed.remote_address(request))
+
+        response = HttpResponse(body, content_type="text/csv; charset=utf-8")
+        # A conversion feed is a moving window over a table. A cached copy
+        # is a file that reports yesterday's conversions forever, and the
+        # consumer here is somebody else's fetcher whose caching rules this
+        # deployment does not get to see.
+        response["Cache-Control"] = "no-store"
+        response["Content-Disposition"] = (
+            'attachment; filename="google-ads-conversions.csv"'
+        )
+        return response
+
+
 __all__ = [
+    "ConversionFeedView",
     "EventRegistryView",
     "EventsReportView",
     "FunnelDetailView",

@@ -144,6 +144,26 @@ With it, that rule is enforced locally. Without it the module falls back to
 the conversion's own age — a strictly weaker test, and it says so instead of
 advertising a guarantee the input cannot support.
 
+### …or let the platform read the outbox itself
+
+The upload above needs an OAuth client, a refresh token and a developer
+token that is granted per account and can be refused. When yours cannot get
+one, the same outbox is servable as a file the platform's data manager
+fetches on its own schedule — a URL, a token, no credentials of ours:
+
+```bash
+curl -H "Authorization: Bearer $CONVERSION_FEED_TOKEN" \
+     https://example.com/analytics/api/v1/conversions/google-ads.csv
+Google Click ID,GBRAID,WBRAID,Conversion Name,Conversion Time,Conversion Value,Conversion Currency
+```
+
+It ships **off** — an empty `CONVERSION_FEED_TOKEN` is a 404, because the
+file carries click identifiers and payment values. Serving it never
+consumes a row (a re-read answers the same file; the platform deduplicates)
+and it writes down that it was read, so
+`manage.py analytics_conversion_feed_status` can answer the one question a
+pull cannot: has the first load actually landed.
+
 ## Privacy is the default, not a setting you remember
 
 - prop values that look like an email or a phone number are **refused**, and

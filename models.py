@@ -1,4 +1,4 @@
-"""Models of stapel-analytics — two tables, and the one it does NOT have.
+"""Models of stapel-analytics — three tables, and the one it does NOT have.
 
 The events themselves have **no model here**. They live in
 ``stapel_core.eventstore`` (``store.py``), the fleet's append-only stream
@@ -17,6 +17,14 @@ on its way to an ad platform. It is a transactional outbox entry, not
 analytics data — it exists because the delivery is a call to somebody
 else's API, and a conversion lost to their outage is bidding signal the
 advertiser never gets back.
+
+The third is the **feed fetch**: one line saying somebody pulled the
+conversion feed, when, and how many rows they got. It exists because the
+feed inverts the delivery — the ad platform reads on its own schedule, and
+nothing in a pull tells the server it happened. Without this row the only
+answerable question is "is the endpoint up", and the question an operator
+actually has is "has the first load happened yet", which no amount of
+uptime answers.
 
 A funnel may also arrive DECLARED, from ``STAPEL_ANALYTICS["FUNNELS"]``:
 that is the Studio path (analytics-standard §4 — the CTO agent declares a
@@ -208,4 +216,37 @@ class ConversionUpload(models.Model):
         return f"{self.click_id_type}:{self.click_id[:12]}… {self.status}"
 
 
-__all__ = ["ConversionUpload", "Funnel"]
+class ConversionFeedFetch(models.Model):
+    """One read of the conversion feed. The receipt a pull does not leave.
+
+    Three columns and no more, because the interesting question is small:
+    *when* was it read and *how much* was there. ``remote`` is the caller's
+    address, kept short and best-effort — it is the difference between "the
+    puller is configured" and "somebody found the URL", not an audit trail
+    (there is no user here to audit; the caller is a token).
+
+    Rows are trimmed by ``feed.record_fetch`` — the table answers a
+    question about the recent past, and a receipt log that grows forever to
+    answer it would be a second unbounded table in a module whose whole
+    storage story is about not having one.
+    """
+
+    #: When the feed was served. Indexed because every read of this table
+    #: is "the latest one" or "the ones since".
+    at = models.DateTimeField(auto_now_add=True, db_index=True)
+    #: Rows the response carried. Zero is a real and important answer: the
+    #: puller is working and the outbox is empty.
+    rows = models.PositiveIntegerField(default=0)
+    #: Best-effort remote address of the caller. Blank when the deployment
+    #: sits behind a proxy that does not forward one — blank is honest,
+    #: a guessed address is not.
+    remote = models.CharField(max_length=64, blank=True, default="")
+
+    class Meta:
+        ordering = ("-at",)
+
+    def __str__(self):
+        return f"{self.at:%Y-%m-%d %H:%M} {self.rows} row(s)"
+
+
+__all__ = ["ConversionFeedFetch", "ConversionUpload", "Funnel"]

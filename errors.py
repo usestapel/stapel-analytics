@@ -24,6 +24,13 @@ ERR_404_FUNNEL = "error.404.analytics_funnel_not_found"
 ERR_409_FUNNEL_DECLARED = "error.409.analytics_funnel_declared"
 ERR_409_FUNNEL_CAP = "error.409.analytics_funnel_cap"
 
+# ── The conversion feed ──────────────────────────────────────────────
+#: The endpoint is configured and the caller did not present its token.
+#: A feed with NO token configured does not answer this — it 404s, because
+#: "wrong token" and "there is no feed here" are different facts and the
+#: second one should not be turned into an announcement that a feed exists.
+ERR_403_FEED_TOKEN = "error.403.analytics_feed_token"
+
 STAPEL_ANALYTICS_ERRORS = {
     ERR_400_BATCH_SHAPE: "The batch must be an object with an events array",
     ERR_400_BATCH_TOO_LARGE: "A batch carries at most {max} events, this one has {got}",
@@ -40,6 +47,7 @@ STAPEL_ANALYTICS_ERRORS = {
         "(STAPEL_ANALYTICS['FUNNELS']) and is edited there, not over the API"
     ),
     ERR_409_FUNNEL_CAP: "You already have the maximum number of funnels",
+    ERR_403_FEED_TOKEN: "A valid feed token is required to read this feed",
 }
 
 #: What a client can actually DO about each refusal (core's REMEDIATION_VOCAB).
@@ -56,6 +64,7 @@ STAPEL_ANALYTICS_REMEDIATION = {
     ERR_404_FUNNEL: "verify",
     ERR_409_FUNNEL_DECLARED: "contact_support",
     ERR_409_FUNNEL_CAP: "contact_support",
+    ERR_403_FEED_TOKEN: "reauthenticate",
 }
 
 register_service_errors(STAPEL_ANALYTICS_ERRORS, remediation=STAPEL_ANALYTICS_REMEDIATION)

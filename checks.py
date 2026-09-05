@@ -395,6 +395,45 @@ def check_conversion_upload_credentials(app_configs, **kwargs):
     )]
 
 
+@checks.register(checks.Tags.compatibility)
+def check_conversion_feed_name(app_configs, **kwargs):
+    """W012 — the feed is on and still carries the placeholder name.
+
+    The import matches a conversion action by its DISPLAY name, character
+    for character. A file whose ``Conversion Name`` column says something
+    the ads account never heard of is not an error anywhere: the fetch
+    succeeds, the file parses, every row is dropped, and the only symptom
+    is a conversion count that stays at zero. That is the exact shape of
+    failure this module warns about elsewhere, so it warns about it here.
+
+    Fires only when a token is configured — a deployment that never turned
+    the feed on has nothing to name.
+    """
+    from .feed import PLACEHOLDER_CONVERSION_NAME, conversion_name, is_enabled
+
+    if not is_enabled():
+        return []
+    name = conversion_name()
+    if name and name != PLACEHOLDER_CONVERSION_NAME:
+        return []
+    return [checks.Warning(
+        "The conversion feed is enabled and "
+        + (
+            "STAPEL_ANALYTICS['CONVERSION_FEED_CONVERSION_NAME'] is empty"
+            if not name
+            else "its conversion name is still the shipped placeholder "
+                 f"{PLACEHOLDER_CONVERSION_NAME!r}"
+        )
+        + " — the ad platform matches the conversion action by its display "
+          "name, so every row of the served file will be dropped on import "
+          "and the conversion count will simply stay at zero.",
+        hint="Set STAPEL_ANALYTICS['CONVERSION_FEED_CONVERSION_NAME'] to the "
+             "conversion action's name exactly as it is spelled in the ads "
+             "account (capitalisation included).",
+        id="analytics.W012",
+    )]
+
+
 def _pending_conversion_uploads() -> int:
     """Queued uploads, or 0 on a database this check cannot read.
 
@@ -416,6 +455,7 @@ def _pending_conversion_uploads() -> int:
 __all__ = [
     "check_adapters",
     "check_bridge_targets",
+    "check_conversion_feed_name",
     "check_conversion_upload_credentials",
     "check_event_store_installed",
     "check_events_file",

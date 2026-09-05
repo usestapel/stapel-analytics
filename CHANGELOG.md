@@ -4,6 +4,119 @@ All notable changes to stapel-analytics are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Pre-1.0 semver: **minor = breaking**, patch = compatible.
 
+## [0.5.0] — 2026-09-06
+
+Minor. The conversion outbox gets a **second door**: instead of this
+deployment calling an ad platform's API, the platform reads the outbox
+itself as a CSV file over HTTPS.
+
+### Why a second delivery shape
+
+The push path (`0.4.0`) needs an OAuth client, a refresh token and a
+**developer token that is granted per account and can be refused**. A
+deployment that cannot get one has no way to report an offline conversion
+at all — the comm function answers, the rows are written, and the table
+fills with conversions that expire against a 90-day window nothing is
+counting down. That is not a rare shape: an advertiser without API access
+is the normal case, and every ad platform now ships a data manager that
+connects to an HTTPS source on a schedule it owns.
+
+So the two are not alternatives ranked by taste. They are the same fact
+offered through two doors, reading the same rows, and a host opens
+whichever one its account can walk through. Opening both is legal: the
+platform deduplicates on (click id, conversion name, conversion time).
+
+### Added
+
+- **`GET /<mount>/api/v1/conversions/google-ads.csv`**
+  (`views.ConversionFeedView`) — the offline click-conversion outbox as a
+  file, in the click-import template's columns:
+
+  ```
+  Google Click ID,GBRAID,WBRAID,Conversion Name,Conversion Time,Conversion Value,Conversion Currency
+  ```
+
+  The three identifier columns are adjacent and first because the rule they
+  express is "exactly one of these is filled" — a gbraid written into the
+  gclid column is not a mistyped value, it is a row the import drops.
+  Column ORDER is not load-bearing (a connection maps by header name in its
+  wizard); the click-id → column mapping is, and one test asserts the whole
+  of it.
+- **`feed.py`** — the file, the windows, the token and the receipt.
+- **`CONVERSION_FEED_TOKEN`** (`""`), **`CONVERSION_FEED_WINDOW_DAYS`**
+  (`120`), **`CONVERSION_FEED_CONVERSION_NAME`** (`"Offline conversion"`).
+- **`ConversionFeedFetch`** (`{at, rows, remote}`) + migration `0003` —
+  one row per served response.
+- **`manage.py analytics_conversion_feed_status`** — configuration and last
+  fetch, and never the token.
+- **`stapel_analytics.urls_feed`** — the feed mountable ALONE, for a service
+  that installs this module only to hand a platform a file and must not get
+  an anonymous ingest route as a side effect. It re-exports the same pattern
+  objects `urls_v1` mounts, so the two doors cannot become two paths. Its
+  own capability gate, `analytics.conversion_feed`.
+- **`error.403.analytics_feed_token`**, with ru/es catalogues.
+- **`analytics.W012`** — the feed is on and its conversion name is empty or
+  still the shipped placeholder.
+
+### It ships off, and off means gone
+
+`CONVERSION_FEED_TOKEN` is empty by default and an empty token is a **404**,
+not a 401 and not an open file. The response carries click identifiers and
+payment values; a library that shipped that reachable by anybody who
+guessed the path would be handing one deployment's revenue data to the
+internet. A configured feed answers **403** to a wrong or missing token,
+compared with `hmac.compare_digest` — a comparison that returns early hands
+the token over one character at a time to anybody willing to time it.
+`Cache-Control: no-store`, because a cached copy is a file that reports
+yesterday's conversions forever to a fetcher whose caching rules we cannot
+see.
+
+### A re-read answers the same file
+
+The response is a pure function of (now, the outbox) over
+`CONVERSION_FEED_WINDOW_DAYS`, not a queue that drains as it is read.
+That window is deliberately **wider** (120) than the platform's 90-day click
+window: the puller owns its own schedule and its own retries, and a feed
+that dropped a row the moment our retention said so would turn one missed
+fetch into one permanently lost conversion.
+
+Serving does two pieces of bookkeeping and changes nothing else. It writes
+the receipt — a push knows it happened, a pull does not, and "has the first
+load landed yet" is a question no amount of uptime answers — and it settles
+the rows below.
+
+### `expired`: the outbox stops keeping what can never go
+
+**New terminal reason, and it is not `window`.** `window` says the
+conversion happened too long after its click — a fact about the pair, true
+the moment it was written down. `expired` says the pair was reportable when
+it arrived and is not any more, because nobody reported it in time. One is
+the caller's data, the other is our latency, and a backlog that cannot tell
+them apart cannot be acted on.
+
+`conversions.expire_stale()` settles such rows `skipped` / `expired` with a
+log line naming the row, its click time and the window. It runs on **both**
+doors — at the top of `tasks.upload_click_conversions` and on every feed
+fetch — precisely because a deployment may run only one: a host with no
+credentials never drains, a host whose puller reads the file never uploads,
+and neither may accumulate rows forever. In the drain it also matters for a
+second reason: a row that can never go was spending a pass's `--limit` and
+an attempt from its own give-up budget every quarter hour, pushing the
+reportable rows behind it further down the queue.
+
+`upload_click_conversions` now reports those separately, as
+`{"expired": n, ...}`.
+
+### The one thing a deployment must get exactly right
+
+The `Conversion Name` column. The import finds the conversion action by its
+**display name** in the ad account, character for character — not by the
+resource name the row carries for the API path. A mismatch is not an error
+anywhere: the fetch succeeds, the file parses, every row is dropped, and
+the conversion count simply stays at zero. `analytics.W012` says so at boot
+while the placeholder is still in place, because that failure is invisible
+from this side of the fence.
+
 ## [0.4.1] — 2026-09-05
 
 Patch. 0.4.0 shipped a durable outbox, a backoff and a command to run it —

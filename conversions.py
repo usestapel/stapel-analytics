@@ -50,6 +50,17 @@ click time is not something a conversion event carries. So:
 
 Supplying ``clicked_at`` is therefore the difference between a local
 refusal and a wasted API call, and this module does not pretend otherwise.
+
+**And a row can run out of time while it waits.** The two verdicts are not
+the same question. ``window_verdict`` asks whether the conversion happened
+too long after its click — a fact about the pair, true the moment it was
+written down. :func:`expiry_verdict` asks whether the *click* has aged past
+the window as of now: the pair was reportable when it arrived and is not
+reportable any more, because nobody reported it. That is our latency, not
+the caller's data, and it comes back ``expired`` rather than ``window`` so
+a backlog can be read for what it is. Both are terminal — nothing later
+makes a click younger — so :func:`expire_stale` settles them with a log
+line instead of leaving a queue that retries the unreportable forever.
 """
 from __future__ import annotations
 
@@ -88,6 +99,13 @@ REQUIRED_CREDENTIALS = (
 #: Reason codes this module produces itself. A rejection reason comes from
 #: Google and is passed through verbatim.
 REASON_WINDOW = "window"
+#: The click itself has aged out of the window as of NOW. Distinct from
+#: ``window`` on purpose: ``window`` says the conversion happened too long
+#: after its click (a fact about the pair, true the moment it was
+#: enqueued), while ``expired`` says the pair was fine and we ran out of
+#: time to report it. One is a caller's data, the other is our own
+#: latency, and an operator reading a backlog needs to tell them apart.
+REASON_EXPIRED = "expired"
 REASON_NOT_CONFIGURED = "not_configured"
 REASON_NO_RESULT = "no_result"
 REASON_MAX_ATTEMPTS = "max_attempts"
@@ -216,6 +234,87 @@ def window_verdict(conversion_at, clicked_at=None, *, now=None) -> str | None:
         return REASON_WINDOW if conversion_at - clicked_at > horizon else None
     reference = now or timezone.now()
     return REASON_WINDOW if reference - conversion_at > horizon else None
+
+
+def expiry_verdict(conversion_at, clicked_at=None, *, now=None) -> str | None:
+    """``"expired"`` when the CLICK has aged out of the window as of now.
+
+    ``window_verdict`` asks whether the conversion came too long after its
+    click. This asks the other question, the one that only time can answer:
+    the pair was reportable when it was written down, and it is not
+    reportable any more. Google measures the 90 days from the click, so the
+    reference is ``clicked_at`` when the caller supplied it and
+    ``conversion_at`` otherwise — the same weaker fallback the module
+    docstring describes, and never a stricter one.
+
+    Terminal by construction: nothing that happens later makes a click
+    younger, so a row this refuses is settled rather than retried.
+    """
+    reference = clicked_at if clicked_at is not None else conversion_at
+    moment = now or timezone.now()
+    return REASON_EXPIRED if moment - reference > window() else None
+
+
+def stale_verdict(row, *, now=None) -> str | None:
+    """Both permanent refusals for one outbox row, in order of specificity.
+
+    ``window`` first: it is the more precise statement about a row that
+    fails both, and it was true before ``expired`` became true.
+    """
+    return window_verdict(row.conversion_at, row.clicked_at, now=now) or expiry_verdict(
+        row.conversion_at, row.clicked_at, now=now
+    )
+
+
+def expire_stale(*, now=None) -> int:
+    """Settle every pending row that can never be uploaded. Returns the count.
+
+    This is the half of the outbox that has no other owner. A row whose
+    click has aged out is not "failing" — it is *finished*, and a queue
+    that keeps re-attempting it burns quota, hides the rows behind it and
+    turns a bounded backlog into an unbounded one. Each settled row gets a
+    log line, because a conversion this deployment could have reported and
+    did not is a fact somebody should be able to find.
+
+    Called from both places that touch the outbox on a schedule — the
+    upload task and the feed — precisely because a deployment may run only
+    one of them. A host with no Google Ads credentials never drains, and a
+    host whose puller reads the feed never uploads; neither may accumulate
+    rows forever.
+
+    Idempotent: settled rows are terminal, so a second pass finds nothing.
+    """
+    from django.db.models import Q
+
+    from .models import ConversionUpload
+
+    moment = now or timezone.now()
+    horizon = moment - window()
+    # Narrow in the database first — the exact verdict needs both columns
+    # and this only has to be a superset of the rows it can settle.
+    candidates = ConversionUpload.objects.filter(
+        status=ConversionUpload.STATUS_PENDING
+    ).filter(
+        Q(clicked_at__lt=horizon)
+        | (Q(clicked_at__isnull=True) & Q(conversion_at__lt=horizon))
+    )
+    settled = 0
+    for row in candidates.iterator():
+        reason = stale_verdict(row, now=moment)
+        if reason is None:  # pragma: no cover — the filter is a superset
+            continue
+        _settle(row, ConversionUpload.STATUS_SKIPPED, reason)
+        logger.info(
+            "conversion upload %s settled as %s: click %s, conversion %s, "
+            "window %s day(s) — it will not be retried",
+            row.pk,
+            reason,
+            row.clicked_at.isoformat() if row.clicked_at else "unknown",
+            row.conversion_at.isoformat(),
+            window().days,
+        )
+        settled += 1
+    return settled
 
 
 # ── The SDK seam ─────────────────────────────────────────────────────
@@ -377,8 +476,16 @@ def deliver(row) -> dict:
             **({"reason": row.reason} if row.reason else {}),
         }
 
-    verdict = window_verdict(row.conversion_at, row.clicked_at)
+    verdict = stale_verdict(row)
     if verdict:
+        if verdict == REASON_EXPIRED:
+            logger.info(
+                "conversion upload %s settled as expired: click %s is past the "
+                "%s-day window — it will not be retried",
+                row.pk,
+                row.clicked_at.isoformat() if row.clicked_at else "unknown",
+                window().days,
+            )
         return _settle(row, ConversionUpload.STATUS_SKIPPED, verdict)
 
     if not row.conversion_action:
@@ -477,10 +584,13 @@ __all__ = [
     "deliver",
     "due",
     "enqueue",
+    "expire_stale",
+    "expiry_verdict",
     "google_datetime",
     "is_configured",
     "parse_timestamp",
     "send",
+    "stale_verdict",
     "upload_click_conversion",
     "window_verdict",
 ]

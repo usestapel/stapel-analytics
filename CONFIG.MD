@@ -5,9 +5,9 @@ key: `settings.STAPEL_ANALYTICS` → flat Django setting of the same name →
 environment variable → default. The two seam keys (`SUBJECT_RESOLVER`,
 `PII_GUARD`) are **never** read from the environment — a name that decides
 which code the process loads is not something a stray `export` may choose.
-The `GOOGLE_ADS_*` credentials are the opposite case and the environment is
-exactly where they belong; see that section for why the two rules do not
-contradict each other.
+The `GOOGLE_ADS_*` credentials and `CONVERSION_FEED_TOKEN` are the opposite
+case and the environment is exactly where they belong; see those sections
+for why the two rules do not contradict each other.
 
 Nothing here needs to be set for the module to boot. What a host actually has
 to decide is in §"The five decisions" at the end.
@@ -84,7 +84,8 @@ to decide is in §"The five decisions" at the end.
 ## Google Ads offline conversions
 
 The upload of an offline click conversion back to Google Ads
-(`conversions.py`, MODULE.md §8). Every key ships empty or with a working
+(`conversions.py`, MODULE.md §8). The **pull** half of the same story — a
+file the ad platform fetches itself — is the next section. Every key ships empty or with a working
 default: a deployment that does not use the uploader configures nothing,
 and one that half-configures it gets `skipped` / `not_configured` rather
 than a failure deep inside the vendor SDK.
@@ -116,6 +117,28 @@ The SDK itself is an optional extra — `pip install
 "stapel-analytics[google-ads]"`. Without it the library imports and runs
 normally and an upload comes back `pending` with a reason naming the
 missing package.
+
+## The conversion feed
+
+The other door onto the same outbox: instead of this deployment calling the
+ad platform, the platform's data manager fetches
+`/<mount>/api/v1/conversions/google-ads.csv` on a schedule it owns
+(`feed.py`, MODULE.md §8). No OAuth client, no developer token — a URL, a
+token and a file. A host that has both doors may open both; the rows are
+the same rows and the platform deduplicates.
+
+| Key | Default | What it does |
+|---|---|---|
+| `CONVERSION_FEED_TOKEN` | `""` | **Secret.** The bearer (or `?token=`) the feed demands, compared in constant time. **Empty disables the endpoint entirely — 404, not "open".** The file carries click identifiers and payment values, so this is the one switch here that had to ship closed. |
+| `CONVERSION_FEED_WINDOW_DAYS` | `120` | How much history one response carries. Deliberately WIDER than the 90-day click window: the puller owns its own schedule and its own retries, and a feed that dropped a row on our retention would turn one missed fetch into one permanently lost conversion. Rows are still gated by `GOOGLE_ADS_CONVERSION_WINDOW_DAYS`, which is the platform's rule, not ours. |
+| `CONVERSION_FEED_CONVERSION_NAME` | `"Offline conversion"` | The `Conversion Name` column. The import matches the conversion action by its DISPLAY name in the ad account, character for character — not by the resource name `conversion_action` carries for the API path. A mismatch is not an error anywhere: the fetch succeeds, the file parses, every row is dropped, and the conversion count stays at zero. `analytics.W012` fires when the feed is on and this is empty or still the shipped placeholder. |
+
+Serving the feed never consumes a row — a re-read answers the same file —
+but it does two pieces of bookkeeping: it writes a `ConversionFeedFetch`
+receipt (`manage.py analytics_conversion_feed_status` prints the last one,
+and never the token), and it settles rows whose click has aged past the
+window as `skipped` / `expired`. A pull-only deployment runs no drain, so
+without that second half the outbox would only ever grow.
 
 ## API
 

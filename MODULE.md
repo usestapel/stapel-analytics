@@ -140,6 +140,7 @@ python manage.py analytics_event_registry          # from a shell
 | `/funnels/<slug>/report` | GET | owner/staff | `?start=&end=&compare=` |
 | `/reports/events` | GET | staff | counts by `name` / `source` / `kind` |
 | `/error-keys/` | GET | staff/service | the listing the stapel-translate collector reads |
+| `/conversions/google-ads.csv` | GET | **feed token** | the offline-conversion file an ad platform pulls (§8); 404 when no token is configured |
 
 "mandate" is `HasWorkspaceMandateIfScoped` — the library-shaped gate: where a
 deployment can answer the mandate question it enforces the third principal
@@ -558,6 +559,103 @@ missing package, and the row waits rather than dying.
 
 ---
 
+### The conversion feed — the same outbox, pulled instead of pushed
+
+The uploader above needs an OAuth client, a refresh token and a developer
+token that is granted per account and can be refused. A deployment that
+cannot get one has no way to report an offline conversion at all, and the
+rows pile up in a table nothing drains. So the same outbox is also servable
+as a **file the ad platform fetches itself** — its data manager connects to
+an HTTPS source on a schedule it owns, and no credential of ours is
+involved.
+
+```
+GET /<mount>/api/v1/conversions/google-ads.csv
+Authorization: Bearer <CONVERSION_FEED_TOKEN>      # or ?token=<...>
+```
+
+```
+Google Click ID,GBRAID,WBRAID,Conversion Name,Conversion Time,Conversion Value,Conversion Currency
+Cj0KCQjw…,,,Paid registration (offline import),2026-09-04 11:02:00+03:00,49,EUR
+```
+
+The three identifier columns are adjacent and first because the rule they
+express is "exactly one of these is filled" — a gbraid written into the
+gclid column is not a mistyped value, it is a row the import drops. Column
+ORDER is not load-bearing: a data-manager connection maps columns by header
+name in its wizard, which is also where these spellings are compared
+against the template that account is shown.
+
+**Two windows, and they are different in kind.**
+
+| bound | setting | what it says |
+|---|---|---|
+| the click window | `GOOGLE_ADS_CONVERSION_WINDOW_DAYS` (90) | the platform refuses a conversion whose click is older, so such a row never reaches the file |
+| the feed window | `CONVERSION_FEED_WINDOW_DAYS` (120) | how much history one response carries |
+
+The feed window is deliberately **wider** than the click window. The puller
+owns its own schedule and its own retries; a feed that dropped a row the
+moment our retention said so would turn one missed fetch into one
+permanently lost conversion. So a conversion appears in many consecutive
+files and the platform deduplicates on (click id, conversion name,
+conversion time).
+
+**Serving does not consume.** The response is a pure function of (now, the
+outbox): a re-read answers the same rows, and reading the feed never
+changes a row's status. Two things it does do, both bookkeeping:
+
+- it writes a **`ConversionFeedFetch`** receipt — `at`, `rows`, `remote`.
+  A push knows it happened; a pull does not, and "has the first load
+  landed yet" is the question this endpoint exists to make answerable. Ask
+  it with `manage.py analytics_conversion_feed_status`, which prints the
+  configuration and the last fetch and never prints the token.
+- it settles rows whose click has aged out (below). A pull-only deployment
+  runs no drain, so if the feed did not do this the outbox would only grow.
+
+**`expired`, and why it is not `window`.** `window` says the conversion
+happened too long after its click — a fact about the pair, true the moment
+it was written down. `expired` says the pair was reportable when it arrived
+and is not any more, because nobody reported it in time. One is the
+caller's data, the other is our latency, and a backlog that could not tell
+them apart could not be acted on. Both are terminal — nothing later makes a
+click younger — so `conversions.expire_stale()` settles them `skipped` with
+a log line naming the row, its click time and the window. It runs on both
+doors: at the top of `tasks.upload_click_conversions` (where such a row
+would otherwise spend a pass's `--limit` and an attempt from its own
+give-up budget every quarter hour) and on every feed fetch.
+
+**It ships off, and off means gone.** `CONVERSION_FEED_TOKEN` is empty by
+default, and an empty token is a **404** — the file carries click
+identifiers and payment values, and a library that shipped that open would
+publish one deployment's conversions to anybody who guessed the path. A
+configured feed answers **403** to a wrong or missing token, compared with
+`hmac.compare_digest` because a compare that returns early hands the token
+over one character at a time. Responses carry `Cache-Control: no-store`.
+
+**Mounting the feed alone.** A service that installs this module only to
+hand a platform a file has no collector to expose, and mounting the full
+URLconf would put an anonymous ingest route on it as a side effect:
+
+```python
+path("billing/analytics/", include("stapel_analytics.urls_feed"))
+# -> /billing/analytics/api/v1/conversions/google-ads.csv
+```
+
+`urls_feed` re-exports the very same pattern objects `urls_v1` mounts, so
+the two doors can never become two different paths. It is also its own
+capability gate (`analytics.conversion_feed`).
+
+**The `Conversion Name` column is the whole match.** The import finds the
+conversion action by its DISPLAY name in the ad account, character for
+character — not by the resource name the API path uses, which stays
+`conversion_action` on the row. A mismatch is not an error anywhere: the
+fetch succeeds, the file parses, every row is dropped, and the conversion
+count simply stays at zero. `analytics.W012` fires when the feed is on and
+`CONVERSION_FEED_CONVERSION_NAME` is empty or still the shipped
+placeholder.
+
+---
+
 ## 9. Settings — `STAPEL_ANALYTICS`
 
 | Key | Default | What it decides |
@@ -606,6 +704,9 @@ missing package, and the row waits rather than dying.
 | `GOOGLE_ADS_RETRY_BASE_SECONDS` | `300` | backoff base for an upload that could not be attempted |
 | `GOOGLE_ADS_RETRY_MAX_SECONDS` | `86400` | backoff cap |
 | `GOOGLE_ADS_MAX_ATTEMPTS` | `8` | attempts before a row is given up on (`rejected` / `max_attempts`) |
+| `CONVERSION_FEED_TOKEN` | `""` | **secret**, the feed's bearer/query token; empty = the endpoint 404s |
+| `CONVERSION_FEED_WINDOW_DAYS` | `120` | how much history one feed response carries |
+| `CONVERSION_FEED_CONVERSION_NAME` | `"Offline conversion"` | the `Conversion Name` column — must match the ad account's display name |
 | `SUBJECT_RESOLVER` | `…ingest.default_subject` | dotted path: what "the same person" means |
 | `PII_GUARD` | `…privacy.looks_like_pii` | dotted path: the PII heuristic |
 
@@ -629,6 +730,7 @@ CODE, so they are never readable from an environment variable.
 | `analytics.W009` | Warning | `analytics` is not in `STAPEL_GDPR["DATA_OWNERS"]` |
 | `analytics.W010` | Warning | `REQUIRE_WRITE_KEY` on with no `WRITE_KEYS` |
 | `analytics.W011` | Warning | click conversions are queued and the Google Ads credentials are incomplete |
+| `analytics.W012` | Warning | the conversion feed is on and its conversion name is empty or still the placeholder |
 
 ---
 
@@ -645,7 +747,8 @@ registers `emits/` and `functions/`): `gdpr.erasure.requested`,
 `COMM_BRIDGE` names.
 
 **Commands**: `analytics_event_registry`, `analytics_funnel_report`,
-`analytics_fanout`, `analytics_upload_conversions`, `purge_analytics`.
+`analytics_fanout`, `analytics_upload_conversions`,
+`analytics_conversion_feed_status`, `purge_analytics`.
 
 **Follow-ups filed here rather than left implicit:**
 
