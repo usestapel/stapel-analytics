@@ -211,6 +211,24 @@ DEFAULTS = {
     # `max_attempts`. A retry queue with no floor is a queue that hides a
     # permanently wrong credential behind ever-longer silences.
     "GOOGLE_ADS_MAX_ATTEMPTS": 8,
+    # Beat cadence for the outbox drain
+    # (`stapel_analytics.tasks.upload_click_conversions`), same crontab-kwargs
+    # shape as PURGE_SCHEDULE.
+    #
+    # Every quarter hour, and the number is a quota decision rather than a
+    # latency one. Offline conversions are not real-time by construction —
+    # they are reported against a 90-day window — so nothing is bought by
+    # running this every minute, and something is spent: one conversion is
+    # one Google Ads API operation, and a Basic-access developer token gets
+    # 15,000 of them a day for the WHOLE deployment. At the task's default
+    # limit of 100 rows a pass, */15 tops out around 9,600 uploads a day,
+    # which leaves the rest of the token's budget for everything else the
+    # host does with it. An idle pass costs Google nothing at all: `due()`
+    # is a database query and no API call happens when nothing is pending.
+    #
+    # It also sits comfortably above GOOGLE_ADS_RETRY_BASE_SECONDS (300), so
+    # the sweep never races a row's own backoff and re-attempts it early.
+    "CONVERSION_UPLOAD_SCHEDULE": {"minute": "*/15"},
 
     # ── Seams (dotted paths; never read from the environment) ────────
     # Decides which id a funnel groups by for one event row: user hash,

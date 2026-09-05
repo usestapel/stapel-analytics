@@ -4,6 +4,70 @@ All notable changes to stapel-analytics are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Pre-1.0 semver: **minor = breaking**, patch = compatible.
 
+## [0.4.1] — 2026-09-05
+
+Patch. 0.4.0 shipped a durable outbox, a backoff and a command to run it —
+and no scheduled thing that runs the command. This adds the drain.
+
+### The gap
+
+`get_analytics_beat_schedule()` had exactly one entry, the retention purge.
+A host that wired it got the conversion outbox with **no sweep**: rows land
+`pending`, the backoff sets `next_attempt_at`, and nothing ever comes back
+for them unless an operator remembers to type
+`manage.py analytics_upload_conversions`. The failure is silent in the worst
+way — a pending queue looks exactly like a healthy one, and the rows expire
+against Google's 90-day window in the meantime.
+
+**A library that owns a retry owns the thing that runs it.** This module
+knows the rows exist, knows when they are due and owns the backoff that
+decides it; leaving the last link to each host is the "documented but never
+wired" class of defect, and it is not a host's mistake to make.
+
+### Added
+
+- **`stapel_analytics.tasks.upload_click_conversions(limit=100)`** — drains
+  `conversions.due(limit)` through `conversions.deliver`, returns counts by
+  status, logs them when there is anything to log. Registered as a
+  `shared_task` under the stable `UPLOAD_TASK_NAME`
+  (`stapel_analytics.tasks.upload_click_conversions`), the same way
+  `purge_analytics_events` is, and a plain callable when celery is absent.
+- **`analytics-upload-conversions`** — a second entry in
+  `get_analytics_beat_schedule()`.
+- **`CONVERSION_UPLOAD_SCHEDULE`** (`{"minute": "*/15"}`) — crontab kwargs,
+  the same shape and conventions as `PURGE_SCHEDULE`.
+
+### Why quarter-hourly
+
+It is a **quota** decision, not a latency one. Offline conversions are
+reported against a 90-day window, so nothing is bought by sweeping every
+minute — and something is spent: one conversion is one Google Ads API
+operation, and a Basic-access developer token gets 15,000 a day for the
+whole deployment. At the task's default limit of 100 rows a pass, `*/15`
+tops out near 9,600 uploads a day and leaves the rest of that budget for
+everything else the host does with the token. An idle pass costs Google
+nothing at all — `due()` is a database query, and no API call happens when
+nothing is pending. The cadence also sits above
+`GOOGLE_ADS_RETRY_BASE_SECONDS` (300), so the sweep never races a row's own
+backoff and re-attempts it early.
+
+### One code path, not two
+
+`manage.py analytics_upload_conversions` now calls
+`tasks.upload_click_conversions` instead of reimplementing the loop. Two
+copies of "which rows are due and what happens to them" would eventually
+disagree about exactly the thing an operator runs the command to check. The
+command stays the manual door, its output is unchanged, and **`--dry-run` is
+untouched** — it is the one branch that deliberately does not go through the
+shared path, because it must write nothing and the task writes. A test
+asserts the dry run never reaches the drain.
+
+The task never raises for an empty outbox and never raises for a row Google
+refuses: a scheduled task that died on one bad click id would stop
+delivering the good rows queued behind it.
+
+Compatible: nothing removed, nothing renamed, no migration.
+
 ## [0.4.0] — 2026-09-05
 
 Minor (pre-1.0: minor = breaking, patch = compatible). A new table, a new

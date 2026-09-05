@@ -18,7 +18,7 @@ from django.core.management import call_command
 from django.utils import timezone
 from stapel_core.comm import call
 
-from stapel_analytics import conversions
+from stapel_analytics import conversions, tasks
 from stapel_analytics.models import ConversionUpload
 
 CREDENTIALS = {
@@ -585,3 +585,165 @@ class TestCredentialCheck:
 
         enqueue_and_deliver()
         assert check_conversion_upload_credentials(None) == []
+
+
+# ── The scheduled drain ──────────────────────────────────────────────
+
+
+@pytest.mark.django_db
+class TestUploadTask:
+    """The beat entry. 0.4.0 shipped the outbox, the backoff and the command
+    and left the sweep to each host — durable rows, no drain, and a silence
+    that looks exactly like a healthy queue."""
+
+    def test_it_drains_what_is_due_and_returns_counts(self, ads, settings):
+        settings.STAPEL_ANALYTICS = {}
+        enqueue_and_deliver()
+        settings.STAPEL_ANALYTICS = dict(CREDENTIALS)
+        ConversionUpload.objects.update(next_attempt_at=None)
+        assert tasks.upload_click_conversions() == {"uploaded": 1}
+        assert ConversionUpload.objects.get().status == "uploaded"
+
+    def test_it_counts_each_status_separately(self, ads, settings):
+        settings.STAPEL_ANALYTICS = {}
+        now = timezone.now()
+        for index in range(2):
+            enqueue_and_deliver(
+                click_id=f"c-{index}",
+                conversion_at=(now - timedelta(minutes=index)).isoformat(),
+            )
+        settings.STAPEL_ANALYTICS = dict(CREDENTIALS)
+        ads["outcome"] = RuntimeError("boom")
+        ConversionUpload.objects.update(next_attempt_at=None)
+        assert tasks.upload_click_conversions() == {"pending": 2}
+
+    def test_an_empty_outbox_is_a_silent_no_op(self, ads):
+        assert tasks.upload_click_conversions() == {}
+
+    def test_an_empty_outbox_touches_no_api(self, ads):
+        tasks.upload_click_conversions()
+        assert ads["requests"] == []
+
+    def test_a_rejection_does_not_kill_the_pass(self, ads, settings):
+        """A task that died on one bad click id would stop delivering the
+        good rows queued behind it."""
+        settings.STAPEL_ANALYTICS = {}
+        now = timezone.now()
+        enqueue_and_deliver(click_id="bad", conversion_at=now.isoformat())
+        settings.STAPEL_ANALYTICS = dict(CREDENTIALS)
+        ads["outcome"] = Message(
+            partial_failure_error=Message(message="CLICK_NOT_FOUND"), results=[]
+        )
+        ConversionUpload.objects.update(next_attempt_at=None)
+        assert tasks.upload_click_conversions() == {"rejected": 1}
+
+    def test_the_limit_bounds_the_pass(self, ads, settings):
+        settings.STAPEL_ANALYTICS = {}
+        now = timezone.now()
+        for index in range(3):
+            enqueue_and_deliver(
+                click_id=f"c-{index}",
+                conversion_at=(now - timedelta(minutes=index)).isoformat(),
+            )
+        settings.STAPEL_ANALYTICS = dict(CREDENTIALS)
+        ConversionUpload.objects.update(next_attempt_at=None)
+        assert tasks.upload_click_conversions(1) == {"uploaded": 1}
+
+    def test_it_leaves_a_backed_off_row_alone(self, ads, settings):
+        settings.STAPEL_ANALYTICS = dict(CREDENTIALS)
+        ads["outcome"] = RuntimeError("boom")
+        enqueue_and_deliver()
+        ads["requests"].clear()
+        assert tasks.upload_click_conversions() == {}
+        assert ads["requests"] == []
+
+
+@pytest.mark.django_db
+class TestCommandAndTaskAreOnePath:
+    """Two copies of "which rows are due and what happens to them" would
+    eventually disagree about the thing an operator runs the command to
+    check."""
+
+    def test_the_command_calls_the_task(self, ads, monkeypatch, settings):
+        settings.STAPEL_ANALYTICS = {}
+        enqueue_and_deliver()
+        settings.STAPEL_ANALYTICS = dict(CREDENTIALS)
+        ConversionUpload.objects.update(next_attempt_at=None)
+        seen = {}
+
+        def spy(limit=tasks.DEFAULT_UPLOAD_LIMIT):
+            seen["limit"] = limit
+            return {"uploaded": 1}
+
+        monkeypatch.setattr(tasks, "upload_click_conversions", spy)
+        assert "1 conversion upload(s) attempted" in run(
+            "analytics_upload_conversions"
+        )
+        assert seen["limit"] == tasks.DEFAULT_UPLOAD_LIMIT
+
+    def test_the_command_passes_its_limit_through(self, ads, monkeypatch):
+        seen = {}
+
+        def spy(limit=None):
+            seen["limit"] = limit
+            return {}
+
+        monkeypatch.setattr(tasks, "upload_click_conversions", spy)
+        run("analytics_upload_conversions", "--limit", "7")
+        assert seen["limit"] == 7
+
+    def test_the_dry_run_never_reaches_the_task(self, ads, monkeypatch, settings):
+        """The one branch that must not go through code that writes."""
+        settings.STAPEL_ANALYTICS = {}
+        enqueue_and_deliver()
+        settings.STAPEL_ANALYTICS = dict(CREDENTIALS)
+        ConversionUpload.objects.update(next_attempt_at=None)
+
+        def explode(limit=None):
+            raise AssertionError("--dry-run must not call the drain")
+
+        monkeypatch.setattr(tasks, "upload_click_conversions", explode)
+        assert "dry run" in run("analytics_upload_conversions", "--dry-run")
+
+    def test_the_command_default_limit_is_the_task_default(self):
+        assert tasks.DEFAULT_UPLOAD_LIMIT == 100
+
+
+class TestBeatSchedule:
+    def test_both_entries_ship(self):
+        pytest.importorskip("celery")
+        assert set(tasks.get_analytics_beat_schedule()) == {
+            "analytics-purge",
+            "analytics-upload-conversions",
+        }
+
+    def test_the_drain_entry_names_the_stable_task(self):
+        pytest.importorskip("celery")
+        schedule = tasks.get_analytics_beat_schedule()
+        assert (
+            schedule["analytics-upload-conversions"]["task"]
+            == tasks.UPLOAD_TASK_NAME
+        )
+
+    def test_the_stable_name_resolves_to_the_callable(self):
+        """A beat entry naming a task nothing registers is a schedule that
+        runs nothing and says so nowhere."""
+        module, _, attribute = tasks.UPLOAD_TASK_NAME.rpartition(".")
+        assert module == "stapel_analytics.tasks"
+        assert hasattr(tasks, attribute)
+
+    def test_the_cadence_comes_from_settings(self, settings):
+        pytest.importorskip("celery")
+        settings.STAPEL_ANALYTICS = {
+            "CONVERSION_UPLOAD_SCHEDULE": {"minute": 0, "hour": 3}
+        }
+        entry = tasks.get_analytics_beat_schedule()["analytics-upload-conversions"]
+        assert entry["schedule"].hour == {3}
+
+    def test_the_default_cadence_outruns_the_retry_base(self):
+        """A sweep tighter than GOOGLE_ADS_RETRY_BASE_SECONDS would race a
+        row's own backoff and re-attempt it early."""
+        from stapel_analytics.conf import DEFAULTS
+
+        assert DEFAULTS["CONVERSION_UPLOAD_SCHEDULE"] == {"minute": "*/15"}
+        assert 15 * 60 >= DEFAULTS["GOOGLE_ADS_RETRY_BASE_SECONDS"]

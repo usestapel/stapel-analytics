@@ -52,6 +52,7 @@ to decide is in §"The five decisions" at the end.
 | `STREAM` | `"analytics"` | The `stapel_core.eventstore` stream every row is appended to. Backend, buffering, partitioning and per-stream routing are the event store's own settings (`STAPEL_EVENTSTORE`) — this module never touches a backend. |
 | `RETENTION_DAYS` | `400` | **Decision.** Raw retention applied by `manage.py purge_analytics` / `stapel_analytics.tasks.purge_analytics_events`. `None` = keep forever, which for personal data is a decision somebody made — `analytics.W005` accepts either this or `STAPEL_EVENTSTORE["RETENTION"]`. |
 | `PURGE_SCHEDULE` | `{"hour": 4, "minute": 30}` | Crontab kwargs for the beat entry. |
+| `CONVERSION_UPLOAD_SCHEDULE` | `{"minute": "*/15"}` | Crontab kwargs for the conversion-outbox drain (`stapel_analytics.tasks.upload_click_conversions`, MODULE.md §8). Quarter-hourly is a quota decision, not a latency one: one conversion is one Google Ads API operation, a Basic-access developer token gets 15,000 a day for the whole deployment, and at the task's default of 100 rows a pass this tops out near 9,600. An idle pass costs Google nothing — no rows due, no API call. It also sits above `GOOGLE_ADS_RETRY_BASE_SECONDS`, so the sweep never races a row's own backoff. |
 | `QUERY_PAGE_SIZE` | `1000` | Rows per store page on a report or erasure pass. |
 | `MAX_REPORT_EVENTS` | `200000` | Ceiling on the rows one report scans. Past it the report comes back `truncated: true` rather than becoming an unbounded table scan somebody triggers from a dashboard. |
 

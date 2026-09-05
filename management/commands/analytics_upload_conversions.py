@@ -10,8 +10,17 @@ next-attempt stamp. That is the point of it. An operator running a dry run
 is asking "what would go out", and a dry run that bumped a counter would
 consume an attempt from the budget that decides when a row is given up on —
 the one number the answer depends on.
+
+The real drain lives in ``tasks.upload_click_conversions`` and this command
+calls it rather than reimplementing the loop. Since 0.4.1 that task is also
+a beat entry, and two copies of "which rows are due and what happens to
+them" would eventually disagree about exactly the thing an operator runs
+this command to check. The dry run stays here, because it is the one branch
+that must NOT go through code that writes.
 """
 from django.core.management.base import BaseCommand
+
+from stapel_analytics.tasks import DEFAULT_UPLOAD_LIMIT
 
 
 class Command(BaseCommand):
@@ -19,8 +28,8 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument(
-            "--limit", type=int, default=100,
-            help="Rows to consider this pass (default: 100).",
+            "--limit", type=int, default=DEFAULT_UPLOAD_LIMIT,
+            help=f"Rows to consider this pass (default: {DEFAULT_UPLOAD_LIMIT}).",
         )
         parser.add_argument(
             "--dry-run", action="store_true",
@@ -28,15 +37,15 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        from stapel_analytics import conversions
+        from stapel_analytics import conversions, tasks
 
         limit = max(int(options["limit"]), 0)
-        rows = conversions.due(limit)
-        if not rows:
-            self.stdout.write("no conversion uploads are due")
-            return
 
         if options["dry_run"]:
+            rows = conversions.due(limit)
+            if not rows:
+                self.stdout.write("no conversion uploads are due")
+                return
             configured = conversions.is_configured()
             self.stdout.write(
                 f"{len(rows)} conversion upload(s) due"
@@ -52,10 +61,12 @@ class Command(BaseCommand):
             self.stdout.write("dry run — nothing was written")
             return
 
-        counts = {}
-        for row in rows:
-            answer = conversions.deliver(row)
-            counts[answer["status"]] = counts.get(answer["status"], 0) + 1
-        self.stdout.write(f"{len(rows)} conversion upload(s) attempted")
+        counts = tasks.upload_click_conversions(limit)
+        if not counts:
+            self.stdout.write("no conversion uploads are due")
+            return
+        self.stdout.write(
+            f"{sum(counts.values())} conversion upload(s) attempted"
+        )
         for status, count in sorted(counts.items()):
             self.stdout.write(f"  {status:<10} {count}")

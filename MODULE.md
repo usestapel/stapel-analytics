@@ -491,6 +491,34 @@ python manage.py analytics_upload_conversions --limit 500
 attempt counter. An operator asking "what would go out" must not spend an
 attempt from the budget that decides when a row is given up on.
 
+**The drain is scheduled, not left to the host.** A library that owns a
+retry owns the thing that runs it: `get_analytics_beat_schedule()` carries
+the sweep alongside the retention purge, so a host that wires the schedule
+gets the drain with it.
+
+| entry | task | cadence |
+|---|---|---|
+| `analytics-purge` | `stapel_analytics.tasks.purge_analytics_events` | `PURGE_SCHEDULE` — `{"hour": 4, "minute": 30}` |
+| `analytics-upload-conversions` | `stapel_analytics.tasks.upload_click_conversions` | `CONVERSION_UPLOAD_SCHEDULE` — `{"minute": "*/15"}` |
+
+Quarter-hourly is a **quota** decision, not a latency one. Offline
+conversions are reported against a 90-day window, so nothing is bought by
+sweeping every minute and something is spent: one conversion is one Google
+Ads API operation, and a Basic-access developer token gets 15,000 a day for
+the whole deployment. At the task's default limit of 100 rows a pass, `*/15`
+tops out near 9,600 uploads a day and leaves the rest of the budget for
+everything else the host does with that token. An idle pass costs Google
+nothing — `due()` is a database query, and no API call happens when nothing
+is pending. It also sits above `GOOGLE_ADS_RETRY_BASE_SECONDS` (300), so the
+sweep never races a row's own backoff.
+
+The command and the beat entry are **one code path**:
+`analytics_upload_conversions` calls `tasks.upload_click_conversions`
+rather than reimplementing the loop, because two copies of "which rows are
+due and what happens to them" would eventually disagree about exactly the
+thing an operator runs the command to check. `--dry-run` is the one branch
+that stays out of it — it must write nothing, and the task writes.
+
 **The 90-day window, and what this module can honestly enforce.** Google
 refuses a conversion whose CLICK is older than
 `GOOGLE_ADS_CONVERSION_WINDOW_DAYS`. That distance is click → conversion,
@@ -553,6 +581,7 @@ missing package, and the row waits rather than dying.
 | `STREAM` | `"analytics"` | event-store stream name |
 | `RETENTION_DAYS` | `400` | **decision**: `None` = keep forever |
 | `PURGE_SCHEDULE` | `{"hour": 4, "minute": 30}` | beat cadence for the purge |
+| `CONVERSION_UPLOAD_SCHEDULE` | `{"minute": "*/15"}` | beat cadence for the conversion-outbox drain (§8) |
 | `QUERY_PAGE_SIZE` | `1000` | rows per store page on a report/erasure pass |
 | `MAX_REPORT_EVENTS` | `200000` | scan ceiling; a report past it is `truncated` |
 | `FUNNELS` | `{}` | funnels declared by the project spec (read-only over the API) |
