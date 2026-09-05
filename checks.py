@@ -364,9 +364,59 @@ def _authored_funnel_steps():
         return []
 
 
+@checks.register(checks.Tags.compatibility)
+def check_conversion_upload_credentials(app_configs, **kwargs):
+    """W011 — conversions are queuing up and nothing can upload them.
+
+    The configuration that looks healthiest of all: the comm function
+    answers, the rows are written, the command runs and reports, and not
+    one conversion has ever reached Google — because a credential is
+    missing and every row comes back ``not_configured``. The warning fires
+    only when there is actually a backlog, so a deployment that does not
+    use the uploader never sees it.
+    """
+    from .conversions import is_configured
+
+    if is_configured():
+        return []
+    pending = _pending_conversion_uploads()
+    if not pending:
+        return []
+    return [checks.Warning(
+        f"{pending} offline click conversion(s) are queued for Google Ads and "
+        "the credentials are incomplete — every upload comes back "
+        "'not_configured' and the rows will expire against the 90-day window.",
+        hint="Set STAPEL_ANALYTICS['GOOGLE_ADS_DEVELOPER_TOKEN'], "
+             "['GOOGLE_ADS_CLIENT_ID'], ['GOOGLE_ADS_CLIENT_SECRET'], "
+             "['GOOGLE_ADS_REFRESH_TOKEN'] and ['GOOGLE_ADS_CUSTOMER_ID'] "
+             "(the environment is their home), then run "
+             "`manage.py analytics_upload_conversions`.",
+        id="analytics.W011",
+    )]
+
+
+def _pending_conversion_uploads() -> int:
+    """Queued uploads, or 0 on a database this check cannot read.
+
+    Same discipline as ``_authored_funnel_steps``: a check that explodes on
+    a fresh install replaces a useful warning with a broken boot.
+    """
+    from django.db import DatabaseError
+
+    from .models import ConversionUpload
+
+    try:
+        return ConversionUpload.objects.filter(
+            status=ConversionUpload.STATUS_PENDING
+        ).count()
+    except (DatabaseError, Exception):  # noqa: B014 — includes ImproperlyConfigured
+        return 0
+
+
 __all__ = [
     "check_adapters",
     "check_bridge_targets",
+    "check_conversion_upload_credentials",
     "check_event_store_installed",
     "check_events_file",
     "check_funnel_steps",

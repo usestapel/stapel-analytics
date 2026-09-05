@@ -151,6 +151,46 @@ class TestPackaging:
             config["tool"]["setuptools"]["packages"]
         )
 
+    def test_the_command_packages_are_declared(self):
+        """A command directory absent from `packages` is absent from the
+        wheel: it works from a checkout and for nobody running an install,
+        and Django only ever says "Unknown command"."""
+        import tomllib
+
+        with open(ROOT / "pyproject.toml", "rb") as handle:
+            config = tomllib.load(handle)
+        declared = set(config["tool"]["setuptools"]["packages"])
+        assert {
+            "stapel_analytics.management",
+            "stapel_analytics.management.commands",
+        } <= declared
+
+    def test_every_command_module_ships(self):
+        """Every command in the tree is inside a declared package."""
+        import tomllib
+
+        with open(ROOT / "pyproject.toml", "rb") as handle:
+            declared = set(tomllib.load(handle)["tool"]["setuptools"]["packages"])
+        for path in (ROOT / "management").rglob("*.py"):
+            package = "stapel_analytics." + "/".join(
+                path.relative_to(ROOT).parts[:-1]
+            ).replace("/", ".")
+            assert package in declared, path
+
+    def test_the_vendor_sdk_is_an_extra_not_a_dependency(self):
+        """`google-ads` carries a protobuf and grpc stack. A library that
+        made every host install it to import `models.py` is a library
+        nobody mounts — `conversions.py` imports it inside one function."""
+        import tomllib
+
+        with open(ROOT / "pyproject.toml", "rb") as handle:
+            config = tomllib.load(handle)
+        extras = config["project"]["optional-dependencies"]
+        assert any(dep.startswith("google-ads") for dep in extras["google-ads"])
+        assert not any(
+            "google-ads" in dep for dep in config["project"]["dependencies"]
+        )
+
     def test_the_core_floor_is_declared(self):
         import tomllib
 

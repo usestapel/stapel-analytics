@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "analytics.upload_click_conversion",
+  "description": "Report one offline click conversion back to Google Ads. Durable before delivery (ConversionUpload) and idempotent on (click_id, conversion_action, conversion_at). clicked_at is optional but load-bearing: Google's 90-day window is measured from the click, so without it the module can only fall back to now - conversion_at, which is a strictly weaker test.",
+  "type": "object",
+  "required": ["click_id", "conversion_at"],
+  "properties": {
+    "click_id":          { "type": "string", "minLength": 1 },
+    "click_id_type":     { "type": "string", "enum": ["gclid", "gbraid", "wbraid"] },
+    "conversion_action": { "type": "string" },
+    "conversion_at":     { "type": "string" },
+    "clicked_at":        { "type": "string" },
+    "value":             { "type": ["number", "string", "null"] },
+    "currency":          { "type": "string" }
+  },
+  "additionalProperties": false
+}

@@ -35,11 +35,12 @@ POST /analytics/api/v1/events  ──►  registry check + PII guard
               (conversion by step)   ──► adapter fan-out         (GDPR Art. 17)
 ```
 
-An **L2 data-plane module** with exactly **one table**:
+An **L2 data-plane module** with exactly **two tables**:
 
 | Model | Table | Role |
 |---|---|---|
 | `Funnel` | `analytics_funnel` | the DEFINITION: ordered event names + a window |
+| `ConversionUpload` | `analytics_conversionupload` | the OUTBOX: one offline click conversion on its way to Google Ads (§8) |
 
 The events themselves have **no model here**. They go to
 `stapel_core.eventstore` — the fleet's append-only stream primitive, which
@@ -48,9 +49,11 @@ own partitioning and its own scale-out story, would be three problems core
 solved once.
 
 App label `analytics`. UUID primary key on `Funnel`, `@access.standard`: a
-funnel names business milestones, never personal data. The EVENT rows are
-personal data, and they are administered (and erased) through the event
-store — see §7.
+funnel names business milestones, never personal data. `ConversionUpload`
+is `@access.sensitive` and admin-read-only — a click id IS an advertising
+identifier of one person, and a hand-edited outbox row is a conversion
+uploaded twice or not at all. The EVENT rows are personal data, and they
+are administered (and erased) through the event store — see §7.
 
 ---
 
@@ -441,6 +444,90 @@ A vendor SDK is never a built-in: it is one file in the app layer plus one
 line of settings — which is exactly the fast-track contribution class
 analytics-standard §5 describes.
 
+### Offline click conversions — the same seam, pointing the other way
+
+Fan-out mirrors *events* to vendors. The conversion uploader sends
+*outcomes* back to one: Google Ads offline conversion import. A click is
+measured in the browser; the deal it led to closes on the phone a week
+later, and until that outcome is reported back the bidding is optimizing
+for form submissions instead of for revenue.
+
+```python
+call("analytics.upload_click_conversion", {
+    "click_id": "Cj0KCQ…",            # gclid | gbraid | wbraid
+    "click_id_type": "gclid",
+    "conversion_action": "customers/1234567890/conversionActions/42",
+    "conversion_at": "2026-09-04T11:02:00Z",
+    "clicked_at": "2026-08-30T09:14:00Z",   # optional, and load-bearing — see below
+    "value": 4900, "currency": "EUR",
+})
+# -> {"status": "uploaded" | "rejected" | "skipped" | "pending", "reason"?: str}
+```
+
+**Why this one is durable when fan-out is not.** A failing fan-out adapter
+is contained because the event store is the record and the mirror can be
+rebuilt from it (`analytics_fanout --since`). A conversion upload has no
+such second copy: the outcome exists in the host's own domain, and if this
+module drops it nothing reconstructs it. So the conversion is written to
+`ConversionUpload` first and uploaded second, and
+`(click_id, conversion_action, conversion_at)` is unique — the same
+conversion reported twice (a retried webhook, a replayed Action, an
+operator re-running an importer) is one row and at most one upload.
+
+**Four statuses, and the fourth is the honest one.** `uploaded` and
+`rejected` (Google's own message, verbatim) are terminal. `skipped` means
+this module refused to send it. `pending` means the upload could not be
+**attempted** — transport, quota, an expired token — the row is durable,
+and the command retries it on an exponential, capped backoff. "Google said
+no" and "we could not ask" must not share a status: the first is a fact
+about the conversion, the second is a fact about the afternoon.
+
+```
+python manage.py analytics_upload_conversions --dry-run     # lists, writes NOTHING
+python manage.py analytics_upload_conversions --limit 500
+```
+
+`--dry-run` writes nothing at all — not a status, not a reason, not the
+attempt counter. An operator asking "what would go out" must not spend an
+attempt from the budget that decides when a row is given up on.
+
+**The 90-day window, and what this module can honestly enforce.** Google
+refuses a conversion whose CLICK is older than
+`GOOGLE_ADS_CONVERSION_WINDOW_DAYS`. That distance is click → conversion,
+and a conversion event does not carry the click time — hence the optional
+`clicked_at`:
+
+| input | rule enforced locally | what it proves |
+|---|---|---|
+| `clicked_at` given | `conversion_at - clicked_at > window` | Google's actual rule |
+| `clicked_at` absent | `now - conversion_at > window` | strictly weaker: never skips a conversion Google would have taken, but lets through ones it rejects |
+
+The fallback is documented rather than dressed up. A conversion that
+passes it and fails at Google comes back `rejected` with Google's reason,
+not silently. Supplying `clicked_at` is the difference between a local
+refusal and a wasted API call.
+
+**Skips, and which of them are terminal.** `window` is terminal (time only
+moves one way). A blank `conversion_action` is terminal — no configuration
+change supplies an action the row never carried. Missing **credentials**
+are NOT: the answer is `skipped` / `not_configured`, and the row stays
+`pending`, because credentials arriving tomorrow should still upload
+today's conversions, which are well inside the window. `analytics.W011`
+warns when a backlog exists and nothing can send it.
+
+**The SDK is optional.** `google-ads` carries a protobuf runtime; a library
+that made every host install it to import `stapel_analytics.models` is a
+library nobody mounts. The import happens inside
+`conversions._client_class`, at call time — one seam, which is also the one
+the tests stub. Install it with the extra:
+
+```
+pip install "stapel-analytics[google-ads]"
+```
+
+Without it, an upload attempt comes back `pending` with a reason naming the
+missing package, and the row waits rather than dying.
+
 ---
 
 ## 9. Settings — `STAPEL_ANALYTICS`
@@ -479,6 +566,17 @@ analytics-standard §5 describes.
 | `SERVER_SOURCE` | `"server"` | source on bridged / `track()` events |
 | `MAX_PAGE_SIZE` | `100` | cap on the funnel listing (`?limit=` may ask for less) |
 | `LEGACY_INGEST_ALIAS` | `True` | mount `/analytics/api/events` for the shipped facade |
+| `GOOGLE_ADS_DEVELOPER_TOKEN` | `""` | **secret**, from the environment; empty = uploads answer `not_configured` |
+| `GOOGLE_ADS_CLIENT_ID` | `""` | **secret**, OAuth client of the uploading app |
+| `GOOGLE_ADS_CLIENT_SECRET` | `""` | **secret** |
+| `GOOGLE_ADS_REFRESH_TOKEN` | `""` | **secret**, the offline OAuth grant |
+| `GOOGLE_ADS_LOGIN_CUSTOMER_ID` | `""` | manager (MCC) account, only when one is in the path |
+| `GOOGLE_ADS_CUSTOMER_ID` | `""` | the advertiser account uploads are written to (dashes stripped) |
+| `GOOGLE_ADS_API_VERSION` | `None` | pin the Google Ads API version; `None` = the SDK's default |
+| `GOOGLE_ADS_CONVERSION_WINDOW_DAYS` | `90` | Google's click→conversion horizon (§8) |
+| `GOOGLE_ADS_RETRY_BASE_SECONDS` | `300` | backoff base for an upload that could not be attempted |
+| `GOOGLE_ADS_RETRY_MAX_SECONDS` | `86400` | backoff cap |
+| `GOOGLE_ADS_MAX_ATTEMPTS` | `8` | attempts before a row is given up on (`rejected` / `max_attempts`) |
 | `SUBJECT_RESOLVER` | `…ingest.default_subject` | dotted path: what "the same person" means |
 | `PII_GUARD` | `…privacy.looks_like_pii` | dotted path: the PII heuristic |
 
@@ -501,13 +599,15 @@ CODE, so they are never readable from an environment variable.
 | `analytics.W008` | Warning | `USER_HASH_SALT` is set (the join breaks) |
 | `analytics.W009` | Warning | `analytics` is not in `STAPEL_GDPR["DATA_OWNERS"]` |
 | `analytics.W010` | Warning | `REQUIRE_WRITE_KEY` on with no `WRITE_KEYS` |
+| `analytics.W011` | Warning | click conversions are queued and the Google Ads credentials are incomplete |
 
 ---
 
 ## 10. comm surface, commands, and the open follow-ups
 
 **Functions** (`schemas/functions/`): `analytics.track`,
-`analytics.event_registry`, `analytics.funnel_report`.
+`analytics.event_registry`, `analytics.funnel_report`,
+`analytics.upload_click_conversion`.
 **Emits** (`schemas/emits/`): `analytics.events.recorded`, plus the GDPR
 receipts `gdpr.section.erased` / `gdpr.owner.alive`.
 **Consumes** (`schemas/consumes/`, documentation only — `autoload_schemas`
@@ -516,7 +616,7 @@ registers `emits/` and `functions/`): `gdpr.erasure.requested`,
 `COMM_BRIDGE` names.
 
 **Commands**: `analytics_event_registry`, `analytics_funnel_report`,
-`analytics_fanout`, `purge_analytics`.
+`analytics_fanout`, `analytics_upload_conversions`, `purge_analytics`.
 
 **Follow-ups filed here rather than left implicit:**
 
@@ -543,3 +643,17 @@ registers `emits/` and `functions/`): `gdpr.erasure.requested`,
    that seam had the same hole. Residual: a deployment that ROUTES the
    analytics stream to a backend without `rekey` still keeps two subject keys
    for one person, logged at ERROR rather than silently.
+
+7. **`ConversionUpload` is outside the erasure provider, and that is a gap
+   this release states rather than hides.** A click id is an online
+   identifier: rows here are personal data by the same argument §7 makes
+   about event rows. They are not erasable today because the row carries
+   no subject key — it holds a click id and nothing that says whose click
+   it was, deliberately, so it cannot pretend to know. Two honest ways
+   out, and the next minor picks one: give the row an optional
+   `user_hash` filled by callers that have it (erasable, and one more
+   place the hash exists), or give the table a short retention of its own
+   — a settled upload has no reason to outlive the window it was uploaded
+   against. Until then a deployment that uploads conversions should treat
+   the table as in scope for its own retention policy and say so in its
+   record of processing.

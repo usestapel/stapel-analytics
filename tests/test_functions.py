@@ -148,6 +148,7 @@ class TestSchemaRegistration:
             "analytics.track",
             "analytics.event_registry",
             "analytics.funnel_report",
+            "analytics.upload_click_conversion",
         }
 
     def test_the_emitted_topic_has_a_committed_schema(self):

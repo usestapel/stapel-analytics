@@ -110,6 +110,40 @@ Delivery rides the comm outbox, never the ingest request thread. A vendor's
 outage costs you nothing: the event store is the record and
 `manage.py analytics_fanout --since …` replays the mirror.
 
+## Close the loop back to the ad platform
+
+Measuring the click is half of it. The deal it led to closes on the phone a
+week later, and until that outcome goes back to Google Ads the bidding is
+optimizing for form submissions instead of for revenue.
+
+```bash
+pip install "stapel-analytics[google-ads]"
+```
+
+```python
+call("analytics.upload_click_conversion", {
+    "click_id": "Cj0KCQ…",             # gclid | gbraid | wbraid
+    "conversion_action": "customers/1234567890/conversionActions/42",
+    "conversion_at": "2026-09-04T11:02:00Z",
+    "clicked_at": "2026-08-30T09:14:00Z",    # optional, and load-bearing
+    "value": 4900, "currency": "EUR",
+})
+# -> {"status": "uploaded"}
+```
+
+Durable before it is delivered, and idempotent on
+`(click_id, conversion_action, conversion_at)` — the same conversion
+reported twice is one row and at most one upload. An upload that could not
+be *attempted* comes back `pending`, not `rejected`: the row waits and
+`manage.py analytics_upload_conversions` retries it on a capped backoff.
+`--dry-run` lists what would go out and writes nothing at all.
+
+`clicked_at` is optional because most callers do not have it, and
+load-bearing because Google's 90-day window is measured from the **click**.
+With it, that rule is enforced locally. Without it the module falls back to
+the conversion's own age — a strictly weaker test, and it says so instead of
+advertising a guarantee the input cannot support.
+
 ## Privacy is the default, not a setting you remember
 
 - prop values that look like an email or a phone number are **refused**, and

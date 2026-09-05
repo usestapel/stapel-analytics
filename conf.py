@@ -19,6 +19,12 @@ Three kinds of key live here, and the difference matters:
   environment (``stapel_core.conf``: a name that decides which code runs is
   not read from a variable anything in the pod can set).
 - **Plain values** — retention, caps, modes.
+- **Secrets** — the ``GOOGLE_ADS_*`` credentials (``conversions.py``).
+  These are values, not code names, so the environment step stays OPEN for
+  them and that is the point: a refresh token belongs in the environment
+  (or a vault that populates it), never in a settings file baked into an
+  image. They ship empty, and the uploader answers ``not_configured``
+  rather than failing inside the vendor SDK.
 
 **Every switch that trades privacy for reach ships CLOSED.** Prop values
 that look like PII are refused, not stored (``PII_MODE = "reject"``); the
@@ -164,6 +170,47 @@ DEFAULTS = {
     # deployment whose frontend is on a facade that targets v1 turns this
     # off and the alias is gone.
     "LEGACY_INGEST_ALIAS": True,
+
+    # ── Google Ads offline conversions (conversions.py) ──────────────
+    # Credentials. These are the ONE group here that is meant to arrive
+    # from the environment, and doing so is consistent with the house rule
+    # rather than an exception to it: the rule closes the env door for keys
+    # that NAME CODE (`import_strings`), because a stray export must not
+    # decide which module the process loads. A refresh token decides
+    # nothing about control flow — it is a value, it is a secret, and a
+    # secret's home is the environment (or a vault that populates it),
+    # never a settings file in the image. All empty by default: the
+    # uploader answers `skipped` / `not_configured` until a deployment
+    # fills them, rather than failing deep inside the SDK.
+    "GOOGLE_ADS_DEVELOPER_TOKEN": "",
+    "GOOGLE_ADS_CLIENT_ID": "",
+    "GOOGLE_ADS_CLIENT_SECRET": "",
+    "GOOGLE_ADS_REFRESH_TOKEN": "",
+    # Only needed when the authenticated account is a manager (MCC).
+    # Absent from the required set for that reason: demanding it from a
+    # direct advertiser would make a correct configuration look broken.
+    "GOOGLE_ADS_LOGIN_CUSTOMER_ID": "",
+    # The advertiser account the conversions are written to. Dashes are
+    # accepted (that is how Google prints it) and stripped before the call.
+    "GOOGLE_ADS_CUSTOMER_ID": "",
+    # Google Ads API version to pin, e.g. "v18". None = whatever the
+    # installed SDK defaults to. A version is a compatibility decision a
+    # deployment makes on its own cadence, so it is a setting rather than a
+    # constant that a patch release of this library would move under it.
+    "GOOGLE_ADS_API_VERSION": None,
+    # Google refuses a conversion whose CLICK is older than this. Enforced
+    # locally against `clicked_at` when the caller supplies it, and against
+    # `conversion_at` otherwise — a strictly weaker test, and conversions.py
+    # says so instead of pretending the fallback is the real rule.
+    "GOOGLE_ADS_CONVERSION_WINDOW_DAYS": 90,
+    # Backoff for an upload that could not be ATTEMPTED (transport, quota,
+    # an outage) — never for a verdict: Google saying no is terminal.
+    "GOOGLE_ADS_RETRY_BASE_SECONDS": 300,
+    "GOOGLE_ADS_RETRY_MAX_SECONDS": 86400,
+    # Attempts before a row is given up on and marked `rejected` with
+    # `max_attempts`. A retry queue with no floor is a queue that hides a
+    # permanently wrong credential behind ever-longer silences.
+    "GOOGLE_ADS_MAX_ATTEMPTS": 8,
 
     # ── Seams (dotted paths; never read from the environment) ────────
     # Decides which id a funnel groups by for one event row: user hash,

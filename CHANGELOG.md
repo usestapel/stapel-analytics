@@ -4,6 +4,131 @@ All notable changes to stapel-analytics are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Pre-1.0 semver: **minor = breaking**, patch = compatible.
 
+## [0.4.0] — 2026-09-05
+
+Minor (pre-1.0: minor = breaking, patch = compatible). A new table, a new
+comm Function, a new command — and a packaging bug that meant none of this
+module's commands were ever in the wheel.
+
+### Offline click conversions go back to Google Ads
+
+Until now this module measured the click and stopped there. The deal the
+click led to closes on the phone a week later, in a CRM, at a counter — and
+until that outcome is reported back, the ad platform's bidding is
+optimizing for form submissions instead of for revenue. Google Ads calls
+the fix an offline conversion import: hand back the click identifier it
+gave you (`gclid`, or the privacy-preserving `gbraid` / `wbraid` that
+replaced it for iOS app↔web journeys) with what the click was eventually
+worth.
+
+- **`analytics.upload_click_conversion`** (Function, schema committed) —
+  `{click_id, click_id_type, conversion_action, conversion_at, clicked_at?,
+  value?, currency?}` in, `{status, reason?}` out.
+- **`ConversionUpload`** (`analytics_conversionupload`, migration
+  `0002_conversionupload`, additive) — the durable outbox row.
+- **`manage.py analytics_upload_conversions`** — `--dry-run`, `--limit`,
+  exponential capped backoff honouring `next_attempt_at`.
+- **`conversions.py`** — the vendor mapping, and the only place the SDK is
+  named.
+- **`[google-ads]` extra** — `pip install "stapel-analytics[google-ads]"`.
+  Deliberately not in `all`: the tests stub the client at
+  `conversions._client_class` precisely so the mapping is proven WITHOUT
+  the SDK, and adding a grpc build to every CI matrix leg to test code that
+  never calls it is a cost with no verdict attached.
+
+### Why this one is durable when fan-out is not
+
+A failing fan-out adapter is CONTAINED: the event store is the record, the
+mirror is rebuildable from it (`analytics_fanout --since`). A conversion
+upload has no second copy — the outcome lives in the host's own domain, and
+if this module drops it nothing reconstructs it. So the conversion is
+written down first and uploaded second, and
+`(click_id, conversion_action, conversion_at)` is unique: the same
+conversion reported twice, by a retried webhook or a replayed Action or an
+operator re-running an importer, is one row and at most one upload.
+
+### Four statuses, because three of them would have required a lie
+
+`uploaded` and `rejected` (Google's message, verbatim) are terminal.
+`skipped` means this module refused to send it. **`pending` is the fourth**,
+and it is the one the design needs: an upload that could not be ATTEMPTED —
+transport, quota, an expired token — is not a verdict about the conversion,
+it is a fact about the afternoon. The row is durable and the command retries
+it. Reporting `rejected` for a socket error would put a permanent lie in an
+outbox row; reporting `skipped` would say a retry is not coming.
+
+### The 90-day window: what is enforced, and what is only approximated
+
+Google refuses a conversion whose CLICK is older than
+`GOOGLE_ADS_CONVERSION_WINDOW_DAYS` (90). That distance is click →
+conversion, and a conversion event does not carry the click time. So the
+input gained an optional **`clicked_at`**, and the module is explicit about
+which rule it is actually applying:
+
+- with `clicked_at`: `conversion_at - clicked_at > window` → `skipped` /
+  `window`. Google's real rule, enforced locally.
+- without it: `now - conversion_at > window`. **Strictly weaker** — a
+  conversion older than the window implies a click older than the window,
+  so the fallback never skips one Google would have taken, but it does let
+  through ones Google rejects.
+
+Those come back `rejected` with Google's own reason rather than silently.
+The docstring, MODULE.md §8 and CONFIG.MD all say this rather than
+advertising a 90-day guarantee the input cannot support.
+
+### Which skips are terminal, and which are an operator's homework
+
+`window` is terminal (time moves one way). A blank `conversion_action` is
+terminal — no configuration change supplies an action the row never
+carried. **Missing credentials are not.** The answer is `skipped` /
+`not_configured`, but the row stays `pending`: credentials arriving
+tomorrow should still upload today's conversions, which are well inside the
+window. `analytics.W011` warns at boot when a backlog exists and nothing
+can send it.
+
+### Settings
+
+Eleven new keys, all in `STAPEL_ANALYTICS`, all with working defaults or
+empty:
+
+`GOOGLE_ADS_DEVELOPER_TOKEN`, `GOOGLE_ADS_CLIENT_ID`,
+`GOOGLE_ADS_CLIENT_SECRET`, `GOOGLE_ADS_REFRESH_TOKEN`,
+`GOOGLE_ADS_LOGIN_CUSTOMER_ID`, `GOOGLE_ADS_CUSTOMER_ID`,
+`GOOGLE_ADS_API_VERSION`, `GOOGLE_ADS_CONVERSION_WINDOW_DAYS` (90),
+`GOOGLE_ADS_RETRY_BASE_SECONDS` (300), `GOOGLE_ADS_RETRY_MAX_SECONDS`
+(86400), `GOOGLE_ADS_MAX_ATTEMPTS` (8).
+
+The credentials are the one group in this module meant to arrive from the
+environment, and that is consistent with the house rule rather than an
+exception to it: `stapel_core.conf` closes the environment door for keys
+that NAME CODE, because a stray `export` must not decide which module the
+process loads. A refresh token decides nothing about control flow. It is a
+value, it is a secret, and a secret's home is the environment — not a
+settings file baked into an image.
+
+### Fixed: this module's management commands were never in the wheel
+
+`[tool.setuptools] packages` listed `stapel_analytics` and
+`stapel_analytics.migrations` and nothing else, so `management/` and
+`management/commands/` were absent from every wheel this project has
+published. `purge_analytics`, `analytics_fanout`,
+`analytics_event_registry` and `analytics_funnel_report` have worked for
+everyone running from a checkout and for nobody running from an install —
+Django says "Unknown command" and nothing else. Both packages are now
+declared, and two contract tests pin it: one for the two package names, one
+that walks `management/` and asserts every command module lives inside a
+declared package.
+
+### Known gap, stated rather than hidden
+
+`ConversionUpload` is **outside the erasure provider**. A click id is an
+online identifier, so these rows are personal data by the same argument §7
+makes about event rows; they are not erasable today because the row carries
+no subject key — it holds a click id and nothing that says whose click it
+was. MODULE.md §10 follow-up 7 names the two honest ways out and commits
+the next minor to picking one. A deployment that uploads conversions should
+meanwhile treat the table as in scope for its own retention policy.
+
 ## [0.3.2] — 2026-09-02
 
 Patch. Corrects what 0.3.1 said. The floor itself stays at

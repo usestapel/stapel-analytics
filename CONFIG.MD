@@ -5,6 +5,9 @@ key: `settings.STAPEL_ANALYTICS` → flat Django setting of the same name →
 environment variable → default. The two seam keys (`SUBJECT_RESOLVER`,
 `PII_GUARD`) are **never** read from the environment — a name that decides
 which code the process loads is not something a stray `export` may choose.
+The `GOOGLE_ADS_*` credentials are the opposite case and the environment is
+exactly where they belong; see that section for why the two rules do not
+contradict each other.
 
 Nothing here needs to be set for the module to boot. What a host actually has
 to decide is in §"The five decisions" at the end.
@@ -76,6 +79,42 @@ to decide is in §"The five decisions" at the end.
 |---|---|---|
 | `COMM_BRIDGE` | `{}` | `{action_name: event_name}` or `{action_name: {"event", "props": [...], "mapper": "dotted.path"}}`. A host Action becomes a step of the same funnels as the clicks that led to it. Empty by default: a bridge that guessed which Actions are business milestones would invent a funnel nobody declared. A broken mapper raises `ImproperlyConfigured` at `ready()` — a bridge that quietly does not fire looks exactly like a bad conversion rate. |
 | `SERVER_SOURCE` | `"server"` | Source recorded on bridged and `track()`-ed events. |
+
+## Google Ads offline conversions
+
+The upload of an offline click conversion back to Google Ads
+(`conversions.py`, MODULE.md §8). Every key ships empty or with a working
+default: a deployment that does not use the uploader configures nothing,
+and one that half-configures it gets `skipped` / `not_configured` rather
+than a failure deep inside the vendor SDK.
+
+**These are the only keys in this module meant to arrive from the
+environment, and that is consistent with the house rule rather than an
+exception to it.** The rule (`stapel_core.conf`) closes the environment
+door for keys that NAME CODE — `SUBJECT_RESOLVER`, `PII_GUARD` — because a
+stray `export` must not decide which module the process loads. A refresh
+token decides nothing about control flow: it is a value, it is a secret,
+and a secret's home is the environment (or a vault that populates it),
+never a settings file baked into an image.
+
+| Key | Default | What it does |
+|---|---|---|
+| `GOOGLE_ADS_DEVELOPER_TOKEN` | `""` | **Secret.** The Google Ads API developer token of the account making the calls. |
+| `GOOGLE_ADS_CLIENT_ID` | `""` | **Secret.** OAuth client id of the uploading application. |
+| `GOOGLE_ADS_CLIENT_SECRET` | `""` | **Secret.** OAuth client secret. |
+| `GOOGLE_ADS_REFRESH_TOKEN` | `""` | **Secret.** The offline OAuth grant the uploader runs under. |
+| `GOOGLE_ADS_CUSTOMER_ID` | `""` | The advertiser account conversions are written to. Written `123-456-7890` and sent `1234567890`; the dashes are stripped for you. |
+| `GOOGLE_ADS_LOGIN_CUSTOMER_ID` | `""` | The manager (MCC) account in the authentication path, when there is one. Deliberately NOT part of the required set: demanding it from a direct advertiser would make a correct configuration look broken. |
+| `GOOGLE_ADS_API_VERSION` | `None` | Pin the Google Ads API version (e.g. `"v18"`). `None` uses whatever the installed SDK defaults to. A version is a compatibility decision a deployment makes on its own cadence — not one a patch release of this library should move under it. |
+| `GOOGLE_ADS_CONVERSION_WINDOW_DAYS` | `90` | Google's horizon, measured **from the click**. Enforced locally against `clicked_at` when the caller supplies it, and against `conversion_at` otherwise — a strictly weaker test, and `conversions.py` says so rather than claiming to enforce what it cannot measure. |
+| `GOOGLE_ADS_RETRY_BASE_SECONDS` | `300` | Backoff base for an upload that could not be ATTEMPTED (transport, quota, an outage). Never applied to a verdict: Google saying no is terminal. |
+| `GOOGLE_ADS_RETRY_MAX_SECONDS` | `86400` | Backoff cap. What keeps a long outage bounded instead of exponential forever. |
+| `GOOGLE_ADS_MAX_ATTEMPTS` | `8` | Attempts before a row is given up on and marked `rejected` / `max_attempts`. A retry queue with no floor hides a permanently wrong credential behind ever-longer silences. |
+
+The SDK itself is an optional extra — `pip install
+"stapel-analytics[google-ads]"`. Without it the library imports and runs
+normally and an upload comes back `pending` with a reason naming the
+missing package.
 
 ## API
 

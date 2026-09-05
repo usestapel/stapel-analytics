@@ -114,4 +114,45 @@ def funnel_report(payload):
     }
 
 
-__all__ = ["event_registry", "funnel_report", "track"]
+@function("analytics.upload_click_conversion")
+def upload_click_conversion(payload):
+    """Report one offline conversion back to Google Ads.
+
+    Input: ``{"click_id": str, "click_id_type": "gclid"|"gbraid"|"wbraid",
+    "conversion_action": str, "conversion_at": iso8601,
+    "clicked_at"?: iso8601, "value"?: number, "currency"?: str}``.
+    Output: ``{"status": "uploaded"|"rejected"|"skipped"|"pending",
+    "reason"?: str}``.
+
+    The call is durable before it is delivered: the conversion is written
+    to ``ConversionUpload`` and only then uploaded, so a caller that gets
+    an exception has still not lost the conversion. It is idempotent on
+    ``(click_id, conversion_action, conversion_at)`` — the same conversion
+    reported twice is one row and at most one upload.
+
+    ``pending`` is the fourth status and the honest one: the upload could
+    not be ATTEMPTED (transport, quota, an outage), the row is durable, and
+    ``manage.py analytics_upload_conversions`` will retry it on the
+    configured backoff. Google saying no comes back ``rejected`` with
+    Google's own message, which is terminal.
+
+    **On the 90-day window.** Google measures it from the CLICK, and a
+    conversion event does not carry the click time — hence the optional
+    ``clicked_at``. With it, the real rule is enforced locally and the
+    answer is ``skipped`` / ``window``. Without it, this falls back to
+    ``now - conversion_at``, which can only be a weaker test: it never
+    skips a conversion Google would have taken, but it does let through
+    ones Google rejects. ``conversions.py`` documents the trade rather than
+    claiming to enforce what it cannot measure.
+    """
+    from . import conversions
+
+    return conversions.upload_click_conversion(payload)
+
+
+__all__ = [
+    "event_registry",
+    "funnel_report",
+    "track",
+    "upload_click_conversion",
+]

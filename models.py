@@ -1,4 +1,4 @@
-"""Models of stapel-analytics — one table, and the one it does NOT have.
+"""Models of stapel-analytics — two tables, and the one it does NOT have.
 
 The events themselves have **no model here**. They live in
 ``stapel_core.eventstore`` (``store.py``), the fleet's append-only stream
@@ -11,6 +11,12 @@ problems core solved once.
 What IS a row is the **funnel**: a named, ordered list of event names with a
 conversion window. It is small, edited by hand, read by a dashboard, and
 belongs to someone — everything an event row is not.
+
+The second row is the **conversion upload**: one offline click conversion
+on its way to an ad platform. It is a transactional outbox entry, not
+analytics data — it exists because the delivery is a call to somebody
+else's API, and a conversion lost to their outage is bidding signal the
+advertiser never gets back.
 
 A funnel may also arrive DECLARED, from ``STAPEL_ANALYTICS["FUNNELS"]``:
 that is the Studio path (analytics-standard §4 — the CTO agent declares a
@@ -88,4 +94,118 @@ class Funnel(models.Model):
         return self.title or self.slug
 
 
-__all__ = ["Funnel"]
+
+
+@access.sensitive  # a click id is an advertising identifier of one person
+class ConversionUpload(models.Model):
+    """One offline click conversion on its way to Google Ads.
+
+    This is a **transactional outbox row**, not analytics data. It exists
+    because the upload is a call to somebody else's API: it fails for
+    reasons that have nothing to do with the conversion (an expired refresh
+    token, a quota, a network), and a conversion lost to one of those is
+    revenue the advertiser's bidding never learns about. So the fact is
+    written down first, uploaded second, and retried by a command — the same
+    shape ``analytics.events.recorded`` uses for fan-out, made durable
+    because unlike a fan-out mirror there is no second copy to reconcile
+    from.
+
+    The row is its own idempotence key: ``(click_id, conversion_action,
+    conversion_at)`` is unique, so enqueuing the same conversion twice —
+    from a retried webhook, a replayed Action, an operator running the
+    importer again — produces one row and at most one upload.
+
+    House rules (docs/library-standard.md §3.8): index/constraint names
+    <= 30 chars. No FK to the user: a click id is not an account, and the
+    row must not pretend it knows whose it is.
+    """
+
+    #: What kind of click identifier ``click_id`` holds. Google takes each
+    #: in its OWN request field — a gbraid put in ``gclid`` is not a
+    #: mismatched value, it is a rejected upload.
+    CLICK_ID_TYPES = (
+        ("gclid", "gclid"),      # the classic per-click id
+        ("gbraid", "gbraid"),    # app→web, iOS 14.5+ privacy-preserving
+        ("wbraid", "wbraid"),    # web→app, iOS 14.5+ privacy-preserving
+    )
+
+    #: Outbox lifecycle. ``uploaded`` and ``rejected`` are terminal;
+    #: ``skipped`` is terminal too but carries a reason that is about the
+    #: DATA (outside the window) rather than about Google's verdict.
+    STATUS_PENDING = "pending"
+    STATUS_UPLOADED = "uploaded"
+    STATUS_REJECTED = "rejected"
+    STATUS_SKIPPED = "skipped"
+    STATUSES = (
+        (STATUS_PENDING, "pending"),
+        (STATUS_UPLOADED, "uploaded"),
+        (STATUS_REJECTED, "rejected"),
+        (STATUS_SKIPPED, "skipped"),
+    )
+
+    #: The click identifier itself, opaque and long — Google does not
+    #: document a maximum, and a truncated click id is a rejected upload.
+    click_id = models.CharField(max_length=512)
+    click_id_type = models.CharField(
+        max_length=8, choices=CLICK_ID_TYPES, default="gclid"
+    )
+
+    #: Resource name of the conversion action the upload counts against
+    #: (``customers/<cid>/conversionActions/<id>``). May be blank: a caller
+    #: that does not know it yet still gets a durable row, and the upload
+    #: comes back ``skipped`` with ``not_configured`` rather than being
+    #: guessed at.
+    conversion_action = models.CharField(max_length=255, blank=True, default="")
+
+    #: When the conversion happened. Uploaded as Google's
+    #: ``conversion_date_time``.
+    conversion_at = models.DateTimeField()
+
+    #: When the CLICK happened, if the caller knows. Optional because most
+    #: callers do not have it, and load-bearing when they do: Google's
+    #: 90-day window is measured from the click, and this is the only field
+    #: from which that distance can actually be computed (see
+    #: ``conversions.window_verdict``).
+    clicked_at = models.DateTimeField(null=True, blank=True)
+
+    #: Conversion value and its currency. Null value = a conversion that
+    #: counts but carries no money, which is a real case (a lead), not a
+    #: missing number to default to zero.
+    value = models.DecimalField(max_digits=18, decimal_places=4, null=True, blank=True)
+    currency = models.CharField(max_length=3, blank=True, default="")
+
+    status = models.CharField(
+        max_length=16, choices=STATUSES, default=STATUS_PENDING, db_index=True
+    )
+    #: Why it was skipped or rejected, in the words of whoever decided —
+    #: our own reason code for a skip, Google's message for a rejection.
+    #: A status without one is a row an operator debugs by guessing.
+    reason = models.TextField(blank=True, default="")
+
+    #: Upload attempts made so far. Drives the backoff and the give-up.
+    attempts = models.PositiveIntegerField(default=0)
+    #: Earliest next attempt. Null = due now.
+    next_attempt_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("created_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=["click_id", "conversion_action", "conversion_at"],
+                name="anl_conv_upload_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["status", "next_attempt_at"], name="anl_conv_due_idx"
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.click_id_type}:{self.click_id[:12]}… {self.status}"
+
+
+__all__ = ["ConversionUpload", "Funnel"]

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "stapel-analytics"
-version = "0.3.2"
+version = "0.4.0"
 description = "Analytics: event registry, ingest, funnels and adapter fan-out for the Stapel framework"
 readme = "README.md"
 license = { text = "MIT" }
@@ -34,14 +34,39 @@ Changelog = "https://github.com/usestapel/stapel-analytics/blob/main/CHANGELOG.m
 Issues = "https://github.com/usestapel/stapel-analytics/issues"
 
 [project.optional-dependencies]
+# The Google Ads SDK, for `analytics.upload_click_conversion` /
+# `manage.py analytics_upload_conversions` (MODULE.md §8). Optional because
+# it carries a protobuf runtime and a grpc stack: a library that made every
+# host install that to import `stapel_analytics.models` is a library nobody
+# mounts. `conversions.py` imports it inside one function, so everything
+# above that seam works without it.
+google-ads = ["google-ads>=25.0"]
 # celery is optional at runtime (tasks.py degrades to plain callables), but
 # NOT optional for the test job: the beat-schedule tests skip without it,
 # and a skipped test is a gate nobody notices going quiet.
+#
+# `all` is deliberately NOT `google-ads + celery`. The reason `all` exists
+# is the CI install step, which pulls it so no test fails at collection on
+# a missing import — and the conversion tests stub the client at
+# `conversions._client_class` precisely so the suite proves the mapping
+# WITHOUT the SDK. Putting google-ads in `all` would add a grpc build to
+# every CI matrix leg to test code that never calls it.
 all = ["celery>=5.3"]
 
 [tool.setuptools]
 package-dir = {"stapel_analytics" = "."}
-packages = ["stapel_analytics", "stapel_analytics.migrations"]
+# `management` and `management.commands` are packages, not package-data: a
+# directory of .py files that is not listed here is simply absent from the
+# wheel, and a management command absent from the wheel is one that works
+# for every developer running from a checkout and for nobody running from
+# an install. Nothing warns; `manage.py purge_analytics` just says
+# "Unknown command".
+packages = [
+    "stapel_analytics",
+    "stapel_analytics.management",
+    "stapel_analytics.management.commands",
+    "stapel_analytics.migrations",
+]
 
 [tool.setuptools.package-data]
 # The contract documents ship IN THE WHEEL: that is what makes
