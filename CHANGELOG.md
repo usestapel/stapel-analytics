@@ -4,6 +4,36 @@ All notable changes to stapel-analytics are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Pre-1.0 semver: **minor = breaking**, patch = compatible.
 
+## [0.5.1] — 2026-09-07
+
+Patch. The module now ships the error-key registry its translations were
+always keyed by.
+
+### The gap
+
+Since 0.3 this module has owned 23 `error.<status>.analytics_*` keys and
+shipped their `ru`/`es` catalogs in the wheel — and no `docs/errors.json`.
+A host frontend that compiles the fleet's error catalogs reads each
+installed library's registry (owner, code, HTTP status, English text) and
+pairs it with the library's `translations/errors.<lang>.json`; with no
+registry to enumerate, every analytics code was invisible to it, and the
+catalogs beside them were strings nobody could render. The registry is the
+denominator the catalogs divide by; shipping one half was shipping neither.
+
+### Added
+
+- **`docs/errors.json`** — emitted by stapel-core's `generate_error_keys`
+  from the live registry: every key with `status`, `params`, `remediation`,
+  `en` and `owner` (`stapel_analytics` for the 23 owned keys, `stapel_core`
+  for the shared ones the instance can also raise). Packaged in the wheel
+  next to the translations.
+- **`tests/test_error_keys.py`** — the drift gate: the committed artifact
+  must be byte-identical to a fresh emission (`STAPEL_REGEN_ERROR_KEYS=1`
+  regenerates), every owned key must appear with this package as owner and
+  the registry literal as text, every translated key must be declared, and
+  every localized text must keep the canon's `{param}` slots. The existing
+  catalog parity test (`ru`/`es` cover every owned key) stays.
+
 ## [0.5.0] — 2026-09-06
 
 Minor. The conversion outbox gets a **second door**: instead of this

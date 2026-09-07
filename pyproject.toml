@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "stapel-analytics"
-version = "0.5.0"
+version = "0.5.1"
 description = "Analytics: event registry, ingest, funnels and adapter fan-out for the Stapel framework"
 readme = "README.md"
 license = { text = "MIT" }
@@ -74,9 +74,10 @@ packages = [
 # freshness from somebody's discipline into a property of the lockfile.
 # A module that keeps them repo-only publishes code an agent cannot read.
 # Every pattern below matches real files in the tree: a package-data entry
-# matching nothing is a wheel that silently ships less than the repo. The
-# docgen triad (docs/schema.json + capabilities/flows/errors.json) is not
-# emitted yet — MODULE.md §10 — so its patterns are absent rather than dead.
+# matching nothing is a wheel that silently ships less than the repo.
+# docs/errors.json is the one contract artifact emitted so far (gated by
+# tests/test_error_keys.py); schema/flows/capabilities are not — MODULE.md
+# §10 — so their patterns are absent rather than dead.
 stapel_analytics = [
     "py.typed",
     "CONFIG.MD",
@@ -84,6 +85,7 @@ stapel_analytics = [
     "migrations/*.py",
     "schemas/**/*.json",
     "translations/*.json",
+    "docs/errors.json",
 ]
 
 [tool.ruff]
