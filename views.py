@@ -48,7 +48,7 @@ from . import services
 from .conf import analytics_settings
 from .errors import (
     BATCH_KEYS,
-    ERR_403_FEED_TOKEN,
+    ERR_401_FEED_TOKEN,
     ERR_400_BATCH_SHAPE,
     ERR_400_REPORT_PERIOD,
     ERR_403_FORBIDDEN,
@@ -434,12 +434,22 @@ class ConversionFeedView(SerializerSeamMixin, APIView):
     **Authentication is a token, not a session.** There is no user on the
     far end; there is a scheduler holding a secret. ``AllowAny`` with an
     EMPTY authenticator list, and the whole gate is
-    :func:`feed.token_matches`:
+    :func:`feed.credential_matches`:
 
     - no token configured -> **404**. The feed ships off, and off means the
       URL does not exist. A 401 here would be an advertisement.
-    - token configured, wrong or absent one presented -> **403**.
+    - token configured, wrong or absent one presented -> **401** with
+      ``WWW-Authenticate: Basic realm="conversions feed"``. The challenge
+      is for a fetcher that will not send its password until asked —
+      Google's data manager offers a URL, a username and a password and
+      nothing else, so ``Authorization: Basic`` with the token as the
+      password is the door it walks through; ``Bearer`` and ``?token=``
+      stay open for fetchers that can do better or worse.
     - a match -> the file, with ``Cache-Control: no-store``.
+
+    Every attempt is logged at INFO with the scheme, the user-agent and the
+    status — never the credential — so a host can see the first successful
+    fetch by the platform's connector land.
 
     ``get_authenticators`` is emptied for the same reason ``IngestView``
     resolves its own: DRF would otherwise read ``Authorization: Bearer ...``
@@ -466,8 +476,9 @@ class ConversionFeedView(SerializerSeamMixin, APIView):
             OpenApiParameter(
                 name="token",
                 description=(
-                    "The feed token, when the caller cannot send an "
-                    "Authorization: Bearer header."
+                    "The feed token, for a fetcher that can only be given a "
+                    "URL. Prefer Authorization: Basic (any username, the "
+                    "token as the password) or Authorization: Bearer."
                 ),
                 required=False,
                 type=str,
@@ -485,13 +496,18 @@ class ConversionFeedView(SerializerSeamMixin, APIView):
             # feed, and saying "forbidden" would tell a stranger there is
             # something here worth getting a token for.
             raise Http404
-        if not feed.token_matches(feed.presented_token(request)):
-            return StapelErrorResponse(403, ERR_403_FEED_TOKEN)
+        credential = feed.presented_credential(request)
+        if not feed.credential_matches(credential):
+            feed.log_fetch(request, scheme=credential.scheme, status=401)
+            response = StapelErrorResponse(401, ERR_401_FEED_TOKEN)
+            response["WWW-Authenticate"] = feed.CHALLENGE
+            return response
 
         conversions.expire_stale()
         rows = feed.feed_rows()
         body = feed.render_csv(rows)
         feed.record_fetch(rows=len(rows), remote=feed.remote_address(request))
+        feed.log_fetch(request, scheme=credential.scheme, status=200, rows=len(rows))
 
         response = HttpResponse(body, content_type="text/csv; charset=utf-8")
         # A conversion feed is a moving window over a table. A cached copy

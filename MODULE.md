@@ -571,8 +571,16 @@ involved.
 
 ```
 GET /<mount>/api/v1/conversions/google-ads.csv
-Authorization: Bearer <CONVERSION_FEED_TOKEN>      # or ?token=<...>
+Authorization: Basic base64(<any username>:<CONVERSION_FEED_TOKEN>)
+# or: Authorization: Bearer <CONVERSION_FEED_TOKEN>
+# or, for a fetcher that can only be given a URL: ?token=<...>
 ```
+
+Basic is the door Google's data manager walks through — its HTTPS
+connector offers a URL, a username and a password, no bearer and no custom
+header — so the token is the **password** and the username is ignored
+unless `CONVERSION_FEED_USERNAME` pins it. A fetcher that can send a
+password must not be given the token in the URL.
 
 ```
 Google Click ID,GBRAID,WBRAID,Conversion Name,Conversion Time,Conversion Value,Conversion Currency
@@ -628,9 +636,14 @@ give-up budget every quarter hour) and on every feed fetch.
 default, and an empty token is a **404** — the file carries click
 identifiers and payment values, and a library that shipped that open would
 publish one deployment's conversions to anybody who guessed the path. A
-configured feed answers **403** to a wrong or missing token, compared with
+configured feed answers **401** with `WWW-Authenticate: Basic
+realm="conversions feed"` to a wrong or missing credential — the challenge a
+fetcher may need before it sends the password it holds — compared with
 `hmac.compare_digest` because a compare that returns early hands the token
-over one character at a time. Responses carry `Cache-Control: no-store`.
+over one character at a time. Every attempt is logged at INFO
+(`stapel_analytics.feed`: scheme, status, rows, remote, user-agent — never
+the credential), so "the first successful fetch by Google's connector" is a
+line a host can grep for. Responses carry `Cache-Control: no-store`.
 
 **Mounting the feed alone.** A service that installs this module only to
 hand a platform a file has no collector to expose, and mounting the full
@@ -704,7 +717,8 @@ placeholder.
 | `GOOGLE_ADS_RETRY_BASE_SECONDS` | `300` | backoff base for an upload that could not be attempted |
 | `GOOGLE_ADS_RETRY_MAX_SECONDS` | `86400` | backoff cap |
 | `GOOGLE_ADS_MAX_ATTEMPTS` | `8` | attempts before a row is given up on (`rejected` / `max_attempts`) |
-| `CONVERSION_FEED_TOKEN` | `""` | **secret**, the feed's bearer/query token; empty = the endpoint 404s |
+| `CONVERSION_FEED_TOKEN` | `""` | **secret**, the feed's token — Basic password, bearer or `?token=`; empty = the endpoint 404s |
+| `CONVERSION_FEED_USERNAME` | `""` | the Basic-auth username the feed insists on; empty = any username |
 | `CONVERSION_FEED_WINDOW_DAYS` | `120` | how much history one feed response carries |
 | `CONVERSION_FEED_CONVERSION_NAME` | `"Offline conversion"` | the `Conversion Name` column — must match the ad account's display name |
 | `SUBJECT_RESOLVER` | `…ingest.default_subject` | dotted path: what "the same person" means |

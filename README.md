@@ -152,10 +152,19 @@ one, the same outbox is servable as a file the platform's data manager
 fetches on its own schedule — a URL, a token, no credentials of ours:
 
 ```bash
-curl -H "Authorization: Bearer $CONVERSION_FEED_TOKEN" \
+curl -u "google:$CONVERSION_FEED_TOKEN" \
      https://example.com/analytics/api/v1/conversions/google-ads.csv
 Google Click ID,GBRAID,WBRAID,Conversion Name,Conversion Time,Conversion Value,Conversion Currency
 ```
+
+In Google Ads Data Manager (HTTPS → Conversions → offline import):
+
+1. **URL** — `https://example.com/analytics/api/v1/conversions/google-ads.csv`
+2. **Username** — anything (ignored unless `CONVERSION_FEED_USERNAME` pins it)
+3. **Password** — the `CONVERSION_FEED_TOKEN`
+
+Do not put the token in the URL when the fetcher can send a password.
+`Authorization: Bearer` and `?token=` remain for fetchers that cannot.
 
 It ships **off** — an empty `CONVERSION_FEED_TOKEN` is a 404, because the
 file carries click identifiers and payment values. Serving it never

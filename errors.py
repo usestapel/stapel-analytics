@@ -25,11 +25,14 @@ ERR_409_FUNNEL_DECLARED = "error.409.analytics_funnel_declared"
 ERR_409_FUNNEL_CAP = "error.409.analytics_funnel_cap"
 
 # ── The conversion feed ──────────────────────────────────────────────
-#: The endpoint is configured and the caller did not present its token.
-#: A feed with NO token configured does not answer this — it 404s, because
-#: "wrong token" and "there is no feed here" are different facts and the
-#: second one should not be turned into an announcement that a feed exists.
-ERR_403_FEED_TOKEN = "error.403.analytics_feed_token"
+#: The endpoint is configured and the caller did not present its token, or
+#: presented a wrong one. 401 with a ``WWW-Authenticate: Basic`` challenge:
+#: the caller is a fetcher that may need to be asked before it sends the
+#: password it holds. A feed with NO token configured does not answer this
+#: — it 404s, because "wrong token" and "there is no feed here" are
+#: different facts and the second one should not be turned into an
+#: announcement that a feed exists.
+ERR_401_FEED_TOKEN = "error.401.analytics_feed_token"
 
 STAPEL_ANALYTICS_ERRORS = {
     ERR_400_BATCH_SHAPE: "The batch must be an object with an events array",
@@ -47,7 +50,7 @@ STAPEL_ANALYTICS_ERRORS = {
         "(STAPEL_ANALYTICS['FUNNELS']) and is edited there, not over the API"
     ),
     ERR_409_FUNNEL_CAP: "You already have the maximum number of funnels",
-    ERR_403_FEED_TOKEN: "A valid feed token is required to read this feed",
+    ERR_401_FEED_TOKEN: "A valid feed token is required to read this feed",
 }
 
 #: What a client can actually DO about each refusal (core's REMEDIATION_VOCAB).
@@ -64,7 +67,7 @@ STAPEL_ANALYTICS_REMEDIATION = {
     ERR_404_FUNNEL: "verify",
     ERR_409_FUNNEL_DECLARED: "contact_support",
     ERR_409_FUNNEL_CAP: "contact_support",
-    ERR_403_FEED_TOKEN: "reauthenticate",
+    ERR_401_FEED_TOKEN: "reauthenticate",
 }
 
 register_service_errors(STAPEL_ANALYTICS_ERRORS, remediation=STAPEL_ANALYTICS_REMEDIATION)

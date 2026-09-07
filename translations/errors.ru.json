@@ -21,5 +21,5 @@
   "error.400.analytics_event_props_too_large": "Свойства события слишком большие",
   "error.400.analytics_event_invalid_ts": "Не удалось прочитать метку времени события",
   "error.400.analytics_event_too_old": "Событие старше допустимого окна",
-  "error.403.analytics_feed_token": "Для чтения этой ленты нужен корректный токен"
+  "error.401.analytics_feed_token": "Для чтения этой ленты нужен корректный токен"
 }

@@ -240,6 +240,13 @@ DEFAULTS = {
     # open would publish one deployment's conversion values to anybody
     # who guessed the path. Empty = 404, not "open".
     "CONVERSION_FEED_TOKEN": "",
+    # The username the feed's `Authorization: Basic` door insists on. Empty
+    # = any username: the password is the secret, and the connector that
+    # needs this door (Google's data manager: URL, username, password, no
+    # other field) makes the username mandatory to type but meaningless to
+    # us. Set it when a host wants the pair pinned; compared in constant
+    # time like the token.
+    "CONVERSION_FEED_USERNAME": "",
     # How far back the feed looks, in days. Larger than the 90-day click
     # window on purpose: the puller decides its own schedule, and a feed
     # that dropped a row the moment its own retention said so would make

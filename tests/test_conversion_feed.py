@@ -257,7 +257,16 @@ class TestServedStatuses:
         assert parse(fetch(api_client).content.decode()) == []
 
 
-# ── The token ────────────────────────────────────────────────────────
+# ── The credential ───────────────────────────────────────────────────
+
+
+def basic(user: str, password: str) -> str:
+    import base64
+
+    return "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode()
+
+
+CHALLENGE = 'Basic realm="conversions feed"'
 
 
 @pytest.mark.django_db
@@ -271,23 +280,29 @@ class TestToken:
         assert fetch(api_client, token=None).status_code == 404
         assert fetch(api_client, token=TOKEN).status_code == 404
 
-    def test_a_missing_token_is_forbidden(self, api_client):
-        assert fetch(api_client, token=None).status_code == 403
+    def test_a_missing_credential_is_challenged(self, api_client):
+        """401 with the Basic challenge: a fetcher that waits to be asked
+        before it sends its password needs to see it."""
+        response = fetch(api_client, token=None)
+        assert response.status_code == 401
+        assert response["WWW-Authenticate"] == CHALLENGE
 
-    def test_a_wrong_token_is_forbidden(self, api_client):
-        assert fetch(api_client, token="not-the-token").status_code == 403
+    def test_a_wrong_token_is_challenged(self, api_client):
+        response = fetch(api_client, token="not-the-token")
+        assert response.status_code == 401
+        assert response["WWW-Authenticate"] == CHALLENGE
 
-    def test_an_empty_bearer_is_forbidden(self, api_client):
-        assert fetch(api_client, token="").status_code == 403
+    def test_an_empty_bearer_is_challenged(self, api_client):
+        assert fetch(api_client, token="").status_code == 401
 
-    def test_the_right_token_answers_the_file(self, api_client):
+    def test_a_bearer_token_still_answers_the_file(self, api_client):
         assert fetch(api_client).status_code == 200
 
     def test_a_query_token_works_for_a_puller_that_cannot_send_headers(
         self, api_client
     ):
         assert api_client.get(f"{FEED}?token={TOKEN}").status_code == 200
-        assert api_client.get(f"{FEED}?token=wrong").status_code == 403
+        assert api_client.get(f"{FEED}?token=wrong").status_code == 401
 
     def test_the_comparison_is_constant_time(self):
         """A compare that returns early hands the token over one character
@@ -295,6 +310,7 @@ class TestToken:
         import inspect
 
         assert "compare_digest" in inspect.getsource(feed.token_matches)
+        assert "compare_digest" in inspect.getsource(feed.credential_matches)
 
     def test_a_disabled_feed_never_matches_an_empty_token(self, settings):
         settings.STAPEL_ANALYTICS = {}
@@ -303,7 +319,109 @@ class TestToken:
 
     def test_a_refusal_carries_the_module_s_error_key(self, api_client):
         body = fetch(api_client, token="wrong").json()
-        assert body["localizable_error"] == "error.403.analytics_feed_token"
+        assert body["localizable_error"] == "error.401.analytics_feed_token"
+
+
+@pytest.mark.django_db
+class TestBasicAuth:
+    """Google's data manager offers a URL, a username and a password —
+    no bearer, no custom header — so Basic with the token as the password
+    is the door it can walk through."""
+
+    def test_basic_with_the_token_as_password_answers_the_file(self, api_client):
+        response = api_client.get(FEED, HTTP_AUTHORIZATION=basic("google", TOKEN))
+        assert response.status_code == 200
+        assert response["Content-Type"].startswith("text/csv")
+
+    def test_any_username_works_by_default(self, api_client):
+        for user in ("google", "", "ads-connector", "user with spaces"):
+            assert api_client.get(FEED, HTTP_AUTHORIZATION=basic(user, TOKEN)).status_code == 200, user
+
+    def test_a_wrong_password_is_challenged(self, api_client):
+        response = api_client.get(FEED, HTTP_AUTHORIZATION=basic("google", "wrong"))
+        assert response.status_code == 401
+        assert response["WWW-Authenticate"] == CHALLENGE
+        assert response.json()["localizable_error"] == "error.401.analytics_feed_token"
+
+    def test_a_malformed_basic_header_is_challenged(self, api_client):
+        for value in ("Basic", "Basic not-base64!", "Basic bm9jb2xvbg=="):
+            response = api_client.get(FEED, HTTP_AUTHORIZATION=value)
+            assert response.status_code == 401, value
+
+    def test_a_pinned_username_is_enforced(self, api_client, settings):
+        settings.STAPEL_ANALYTICS = {
+            "CONVERSION_FEED_TOKEN": TOKEN,
+            "CONVERSION_FEED_CONVERSION_NAME": NAME,
+            "CONVERSION_FEED_USERNAME": "google",
+        }
+        assert api_client.get(FEED, HTTP_AUTHORIZATION=basic("google", TOKEN)).status_code == 200
+        assert api_client.get(FEED, HTTP_AUTHORIZATION=basic("other", TOKEN)).status_code == 401
+
+    def test_a_pinned_username_does_not_close_the_bearer_door(self, api_client, settings):
+        """A bearer has no username; pinning one is about the Basic pair."""
+        settings.STAPEL_ANALYTICS = {
+            "CONVERSION_FEED_TOKEN": TOKEN,
+            "CONVERSION_FEED_CONVERSION_NAME": NAME,
+            "CONVERSION_FEED_USERNAME": "google",
+        }
+        assert fetch(api_client).status_code == 200
+
+    def test_the_scheme_is_named(self, rf):
+        request = rf.get(FEED, HTTP_AUTHORIZATION=basic("google", TOKEN))
+        credential = feed.presented_credential(request)
+        assert credential.scheme == feed.SCHEME_BASIC
+        assert credential.username == "google"
+        assert credential.token == TOKEN
+        assert feed.presented_credential(rf.get(FEED, HTTP_AUTHORIZATION=f"Bearer {TOKEN}")).scheme == feed.SCHEME_BEARER
+        assert feed.presented_credential(rf.get(f"{FEED}?token={TOKEN}")).scheme == feed.SCHEME_QUERY
+        assert feed.presented_credential(rf.get(FEED)).scheme == ""
+
+
+# ── The log line ─────────────────────────────────────────────────────
+
+
+@pytest.mark.django_db
+class TestFetchLog:
+    """A pull leaves no trace on the server unless the server writes one.
+    The receipt table records served files; the log records every attempt,
+    which is where "Google is hitting the URL and getting 401" shows up."""
+
+    def test_a_served_fetch_logs_scheme_agent_and_status(self, api_client, caplog):
+        import logging
+
+        outbox_row()
+        with caplog.at_level(logging.INFO, logger="stapel_analytics.feed"):
+            api_client.get(
+                FEED,
+                HTTP_AUTHORIZATION=basic("google", TOKEN),
+                HTTP_USER_AGENT="Google-Ads-Data-Manager/1.0",
+            )
+        line = [r for r in caplog.records if r.name == "stapel_analytics.feed"][-1].getMessage()
+        assert "scheme=basic" in line
+        assert "status=200" in line
+        assert "rows=1" in line
+        assert "Google-Ads-Data-Manager/1.0" in line
+
+    def test_a_refusal_is_logged_too(self, api_client, caplog):
+        import logging
+
+        with caplog.at_level(logging.INFO, logger="stapel_analytics.feed"):
+            api_client.get(FEED, HTTP_AUTHORIZATION=basic("google", "wrong"))
+            api_client.get(FEED)
+        lines = [r.getMessage() for r in caplog.records if r.name == "stapel_analytics.feed"]
+        assert any("scheme=basic status=401" in line for line in lines)
+        assert any("scheme=none status=401" in line for line in lines)
+
+    def test_the_credential_is_never_logged(self, api_client, caplog):
+        import logging
+
+        with caplog.at_level(logging.INFO, logger="stapel_analytics.feed"):
+            api_client.get(FEED, HTTP_AUTHORIZATION=basic("google", TOKEN))
+            api_client.get(FEED, HTTP_AUTHORIZATION=f"Bearer {TOKEN}")
+            api_client.get(f"{FEED}?token={TOKEN}")
+            api_client.get(FEED, HTTP_AUTHORIZATION=basic("google", "wrong-secret"))
+        assert TOKEN not in caplog.text
+        assert "wrong-secret" not in caplog.text
 
 
 # ── The response headers ─────────────────────────────────────────────

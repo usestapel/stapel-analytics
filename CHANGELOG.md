@@ -4,6 +4,50 @@ All notable changes to stapel-analytics are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Pre-1.0 semver: **minor = breaking**, patch = compatible.
 
+## [0.5.2] — 2026-09-07
+
+Patch. The conversion feed accepts HTTP Basic auth, which is the only
+credential Google's data manager can send.
+
+### The gap
+
+The feed shipped with two doors — `Authorization: Bearer` and `?token=`.
+Google Ads Data Manager's «HTTPS → Conversions → offline import» connector
+offers exactly three fields: URL, username, password. No bearer, no custom
+header. So a host wiring the connector had one option, the token in the
+URL — the door `feed.py` itself calls the weakest, because a URL lands in
+access logs and referrers. And a refusal was a bare 403: no
+`WWW-Authenticate`, so a fetcher that waits to be challenged before
+sending its password was never going to send it.
+
+### Changed
+
+- **`Authorization: Basic base64(user:password)`** opens the feed when the
+  password matches `CONVERSION_FEED_TOKEN` (constant time). The username
+  is ignored — any username works — unless the new
+  **`CONVERSION_FEED_USERNAME`** pins it. `Bearer`/`Token` and `?token=`
+  keep working. **A host whose fetcher can send a password must not put
+  the token in the URL.**
+- **A missing or wrong credential answers 401**, not 403, and carries
+  `WWW-Authenticate: Basic realm="conversions feed"`. The error key moves
+  with the status: **`error.401.analytics_feed_token`** replaces
+  `error.403.analytics_feed_token` in the registry (`docs/errors.json`) and
+  both catalogs. A disabled feed still 404s.
+- **Every fetch attempt is logged at INFO** by `stapel_analytics.feed`:
+  scheme (`basic`/`bearer`/`query`/`none`), status, rows served, remote
+  address and user-agent — never the credential. A host watches for the
+  first `status=200` from the connector's user-agent to flip its purchase
+  goal to secondary; a stream of `status=401` is a misconfigured connector
+  seen in the same place.
+
+### Added
+
+- `feed.presented_credential` / `feed.Credential` (scheme, token, username),
+  `feed.credential_matches`, `feed.log_fetch`, `feed.CHALLENGE`;
+  `feed.presented_token` stays as the token-only view of the same thing.
+- README: the Data Manager setup in three lines (URL, any username,
+  password = token).
+
 ## [0.5.1] — 2026-09-07
 
 Patch. The module now ships the error-key registry its translations were

@@ -21,5 +21,5 @@
   "error.400.analytics_event_props_too_large": "Las propiedades del evento son demasiado grandes",
   "error.400.analytics_event_invalid_ts": "No se puede leer la marca de tiempo del evento",
   "error.400.analytics_event_too_old": "El evento es más antiguo que la ventana admitida",
-  "error.403.analytics_feed_token": "Se requiere un token de feed válido para leer este feed"
+  "error.401.analytics_feed_token": "Se requiere un token de feed válido para leer este feed"
 }

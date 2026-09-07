@@ -315,6 +315,14 @@
     "owner": "stapel_core"
   },
   {
+    "code": "error.401.analytics_feed_token",
+    "status": 401,
+    "params": [],
+    "remediation": "reauthenticate",
+    "en": "A valid feed token is required to read this feed",
+    "owner": "stapel_analytics"
+  },
+  {
     "code": "error.401.analytics_write_key",
     "status": 401,
     "params": [],
@@ -337,14 +345,6 @@
     "remediation": "retry",
     "en": "Payment required",
     "owner": "stapel_core"
-  },
-  {
-    "code": "error.403.analytics_feed_token",
-    "status": 403,
-    "params": [],
-    "remediation": "reauthenticate",
-    "en": "A valid feed token is required to read this feed",
-    "owner": "stapel_analytics"
   },
   {
     "code": "error.403.analytics_forbidden",
