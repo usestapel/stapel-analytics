@@ -108,6 +108,28 @@ class TestEventRegistryEndpoint:
     def test_anonymous_callers_are_refused(self, api_client):
         assert api_client.get(REGISTRY).status_code in (401, 403)
 
+    def test_the_anonymous_refusal_is_the_fleet_envelope(self, api_client):
+        """The refusal body, not only its status code.
+
+        No line of ``views.py`` builds this response: DRF's permission layer
+        raises it, and the only seam that dresses it is
+        ``REST_FRAMEWORK["EXCEPTION_HANDLER"]``. This harness defined no
+        ``REST_FRAMEWORK`` dict at all, so DRF's own handler answered
+        ``{"detail": "..."}`` here — a shape a frontend reading
+        ``localizable_error`` cannot translate — and the test above could not
+        tell, because a status code is the same either way.
+        ``stapel_core.error_envelope.W001`` reports the settings hole; this
+        asserts the behaviour it costs.
+        """
+        response = api_client.get(REGISTRY)
+
+        assert response.status_code in (401, 403), response.content
+        assert "localizable_error" in response.data, response.data
+        assert response.data["localizable_error"].startswith("error."), response.data
+        assert set(response.data) >= {
+            "localizable_error", "error", "params",
+        }, response.data
+
     def test_an_authenticated_caller_reads_the_registry(self, authed_client):
         response = authed_client.get(REGISTRY)
         assert response.status_code == 200

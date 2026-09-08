@@ -9,6 +9,17 @@ from __future__ import annotations
 
 def settings_kwargs(*, root_urlconf: str = "stapel_analytics.tests.urls") -> dict:
     """The ``settings.configure(**kwargs)`` for a single-module instance."""
+    # DRF's defaults everywhere EXCEPT the one key any settings module that
+    # writes a REST_FRAMEWORK dict must carry. Absent, DRF falls back to its
+    # own exception handler and every refusal no view code raises — 401/403
+    # from authenticators and permission classes, 404 from get_object_or_404,
+    # 405/406/415 from dispatch, 429 from a throttle — answers a bare
+    # {"detail": ...} instead of the fleet envelope
+    # (stapel_core.error_envelope.W001). Read off core's own preset rather
+    # than re-typed; importing it reads no settings, so it is safe before
+    # settings.configure().
+    from stapel_core.testing import BASE_REST_FRAMEWORK
+
     return dict(
         # Long enough for stapel_core.prodguard.E001: the harness is a
         # host, and a host whose own checks fail cannot vouch for a
@@ -85,5 +96,8 @@ def settings_kwargs(*, root_urlconf: str = "stapel_analytics.tests.urls") -> dic
         },
         MIGRATION_MODULES={
             "users": None,
+        },
+        REST_FRAMEWORK={
+            "EXCEPTION_HANDLER": BASE_REST_FRAMEWORK["EXCEPTION_HANDLER"],
         },
     )

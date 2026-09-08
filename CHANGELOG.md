@@ -4,6 +4,37 @@ All notable changes to stapel-analytics are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Pre-1.0 semver: **minor = breaking**, patch = compatible.
 
+## [0.5.3] — 2026-09-08
+
+### Fixed — the refusals no view raises answer the fleet envelope
+
+Patch, no API change, no dependency change. One shipped file moves:
+`_codegen_settings.py`, which defined **no** `REST_FRAMEWORK` key at all — and
+it is the single settings block the whole suite and the management harnesses
+run on.
+
+DRF then falls back to `rest_framework.views.exception_handler`, so every
+refusal **no view code raises** — 401/403 from authenticators and permission
+classes, 404 from `get_object_or_404`, 405/406/415 from dispatch, 429 from a
+throttle — answers a bare `{"detail": …}` instead of
+`{localizable_error, error, params, error_language}`. A frontend that reads
+`localizable_error` finds nothing there.
+`stapel_core.error_envelope.W001` (stapel-core 0.61.1) reports it.
+
+`tests/test_api.py::TestEventRegistryEndpoint::test_anonymous_callers_are_refused`
+already fired the anonymous GET, but asserted the status code alone — a
+reading identical with or without the handler.
+`test_the_anonymous_refusal_is_the_fleet_envelope` now asserts the body, and
+fails on the previous harness with
+`{'detail': 'Authentication credentials were not provided.'}`.
+
+No pre-existing test changed behaviour.
+
+The key is read off `stapel_core.testing.BASE_REST_FRAMEWORK` rather than
+re-typed, and it is the only key set — DRF's own defaults stay where the
+harness had them, so no permission, renderer or authentication behaviour
+changes.
+
 ## [0.5.2] — 2026-09-07
 
 Patch. The conversion feed accepts HTTP Basic auth, which is the only
