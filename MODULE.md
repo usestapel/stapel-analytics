@@ -559,6 +559,82 @@ missing package, and the row waits rather than dying.
 
 ---
 
+### The attribution cookie — where the click id comes from
+
+An upload needs a click identifier and, to be judged by the real rule, a
+click *time*. Both arrive today through the narrowest door in the funnel:
+the frontend reads them off the landing URL and posts them with the
+registration. That works only when the visitor lands and signs up in the
+same session on the same device. A visitor who lands on the marketing site
+on Monday and signs up on Friday brings nothing, and the campaign that paid
+for them is credited with nothing.
+
+`AttributionCookieMiddleware` closes that gap by reading a cookie the
+marketing site left on the apex domain:
+
+```python
+STAPEL_ANALYTICS = {
+    "ATTRIBUTION_COOKIE": {
+        "NAME": "acme_attr",          # empty (default) = capture is off
+        "FORMAT": "base64url_json",
+        "FIELDS": {"id": "id", "type": "src", "ts": "ts"},
+        "FIRST_TOUCH": True,
+        "URL_PARAM": "click_id",
+    },
+}
+MIDDLEWARE = [..., "stapel_analytics.middleware.AttributionCookieMiddleware"]
+```
+
+The site writes `NAME=base64url({"id": "<click id>", "src": "gclid", "ts":
+<unix seconds>})` on `Domain=.example.com`, `HttpOnly`, `Secure`,
+`SameSite=Lax`, ninety days — so every request the browser makes to the
+application carries it and no script on any subdomain can read it. That
+`HttpOnly` is why the decode is a server job at all.
+
+**What the middleware does, per request.** On any request whose user is
+authenticated — an anonymous *account* included, because a guest enrolment
+is an account and it can pay — with no attribution stored yet and a
+decodable cookie present, it writes one `UserAttribution` row: `click_id`,
+`click_id_type`, `clicked_at` (from `ts`), `captured_at` (now),
+`source="cookie"`. It runs **after** the view, so it sees whichever of the
+fleet's two authentication paths resolved the user, and mount it after the
+authentication middleware — the end of `MIDDLEWARE` is the usual answer.
+`analytics.W013` fires when the cookie is named and the class is not
+mounted.
+
+**First touch wins.** A stored attribution is never overwritten by a
+cookie, and a request that carries the explicit `URL_PARAM` stands the
+cookie down for that request: the identifier the frontend passes came
+through a narrower, more deliberate door. `FIRST_TOUCH: False` inverts it —
+the newest click by `clicked_at` wins — and it is a setting because both
+answers are defensible.
+
+**Ninety days is checked at capture.** A cookie lives ninety days, so a
+click read out of one is routinely at the edge of Google's window. Such a
+record is stored with `expired=True` rather than dropped: it is still the
+honest answer to "where did this account come from", and the flag is what
+keeps a conversion path from enqueueing an upload that can only ever be
+settled `expired`. The conversion path reads the row at payment time — a
+Stripe webhook carries no cookie — and passes `clicked_at`, which is what
+turns the module's weaker fallback rule into the platform's real one.
+
+**Malformed is never an error.** The cookie is somebody else's string. Every
+decode failure is dropped and counted
+(`analytics.attribution_cookie.malformed`, labelled by reason; captures
+count as `analytics.attribution_cookie.captured`), and nothing it can
+contain may fail a request.
+
+**Every platform is stored; only Google's are fed.** `CLICK_ID_TYPES`
+admits `yclid`, `fbclid` and `ttclid` alongside the three Google takes,
+because where an account came from is worth knowing whatever platform sent
+it. The conversion feed filters by type, so a `yclid` row never reaches a
+file whose columns are Google's. **Follow-up:** a Yandex Direct feed is a
+separate file with its own columns and its own upload rules — it is not a
+widening of this one.
+
+The row is personal data and leaves the same way everything else here does:
+`erasure.erase_account` deletes it and the DSAR export carries it.
+
 ### The conversion feed — the same outbox, pulled instead of pushed
 
 The uploader above needs an OAuth client, a refresh token and a developer
@@ -717,6 +793,7 @@ placeholder.
 | `GOOGLE_ADS_RETRY_BASE_SECONDS` | `300` | backoff base for an upload that could not be attempted |
 | `GOOGLE_ADS_RETRY_MAX_SECONDS` | `86400` | backoff cap |
 | `GOOGLE_ADS_MAX_ATTEMPTS` | `8` | attempts before a row is given up on (`rejected` / `max_attempts`) |
+| `ATTRIBUTION_COOKIE` | see §8 | the advertising cookie to capture; `NAME` empty = capture off |
 | `CONVERSION_FEED_TOKEN` | `""` | **secret**, the feed's token — Basic password, bearer or `?token=`; empty = the endpoint 404s |
 | `CONVERSION_FEED_USERNAME` | `""` | the Basic-auth username the feed insists on; empty = any username |
 | `CONVERSION_FEED_WINDOW_DAYS` | `120` | how much history one feed response carries |
@@ -745,6 +822,7 @@ CODE, so they are never readable from an environment variable.
 | `analytics.W010` | Warning | `REQUIRE_WRITE_KEY` on with no `WRITE_KEYS` |
 | `analytics.W011` | Warning | click conversions are queued and the Google Ads credentials are incomplete |
 | `analytics.W012` | Warning | the conversion feed is on and its conversion name is empty or still the placeholder |
+| `analytics.W013` | Warning | `ATTRIBUTION_COOKIE['NAME']` is set and `AttributionCookieMiddleware` is not in `MIDDLEWARE` |
 
 ---
 

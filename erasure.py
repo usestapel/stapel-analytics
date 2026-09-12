@@ -108,11 +108,37 @@ def erase_account(user_id_or_hash, *, already_hashed: bool = False) -> dict:
         "events": purge(filters={"user_hash": user_hash}),
         "anonymous_events": 0,
         "anonymous_ids": len(anon_ids),
+        # The stored ad attribution (attribution.py). Keyed by the raw
+        # account id, so a caller that only ever held the hash erases the
+        # events and says zero here rather than claiming a deletion it could
+        # not perform — the bus protocol always passes the raw id.
+        "attribution": 0 if already_hashed else _erase_attribution(user_id_or_hash),
     }
     for anon_id in anon_ids:
         counts["anonymous_events"] += purge(filters={"anon_id": anon_id})
     logger.info("analytics: account erased (%s)", counts)
     return counts
+
+
+def _erase_attribution(user_id) -> int:
+    """Delete the account's ad attribution row. Never fails an erasure.
+
+    A missing table (a host that pinned this release and has not migrated
+    yet) must not turn a completed event erasure into a failed receipt, so
+    the failure is logged and counted as zero — and the log is what makes it
+    findable rather than silent.
+    """
+    from .attribution import erase_account as erase_attribution
+
+    try:
+        return erase_attribution(user_id)
+    except Exception:
+        logger.exception(
+            "analytics: could not erase the ad attribution of %s "
+            "(the event erasure itself stands)",
+            user_id,
+        )
+        return 0
 
 
 def erase_anonymous(anon_id) -> dict:
@@ -143,11 +169,21 @@ def export_account(user_id_or_hash, *, already_hashed: bool = False) -> dict:
     for row in iter_events(filters={"user_hash": user_hash}, limit=budget):
         ts = row.pop("ts", None)
         rows.append({**row, "ts": ts.isoformat() if ts is not None else None})
+    from .attribution import attribution_as_dict, attribution_for
+
     return {
         "user_hash": user_hash,
         "events": rows,
         "count": len(rows),
         "truncated": len(rows) >= budget,
+        # The ad click the account came from, when this module holds one.
+        # An export that omitted it would certify as complete a picture that
+        # leaves out the one row a person is most likely to ask about.
+        "attribution": (
+            None if already_hashed else attribution_as_dict(
+                attribution_for(user_id_or_hash)
+            )
+        ),
     }
 
 

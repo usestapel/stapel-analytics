@@ -314,6 +314,15 @@ def feed_rows(*, now=None):
     platform's: a row past it is refused on import, so it is filtered out
     here whatever its status — including a row the push path already
     uploaded, which was fine when it went and is not fine to re-offer now.
+
+    And one filter that is neither: **this file is Google's**. Its three
+    identifier columns are the three Google takes, so a row carrying any
+    other platform's click id (a ``yclid``, say — ``attribution.py`` stores
+    those, because where an account came from is worth knowing whatever
+    platform sent it) is excluded by type rather than reaching
+    :func:`row_values` and raising on a column that does not exist. A Yandex
+    Direct feed is a separate file with its own columns; it is a follow-up,
+    not a widening of this one.
     """
     from .conversions import stale_verdict
     from .models import ConversionUpload
@@ -322,7 +331,9 @@ def feed_rows(*, now=None):
     since = moment - timedelta(days=window_days())
     queryset = (
         ConversionUpload.objects.filter(
-            status__in=FED_STATUSES, conversion_at__gte=since
+            status__in=FED_STATUSES,
+            conversion_at__gte=since,
+            click_id_type__in=tuple(CLICK_ID_COLUMNS),
         )
         .exclude(click_id="")
         .order_by("conversion_at", "pk")

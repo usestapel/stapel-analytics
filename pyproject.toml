@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "stapel-analytics"
-version = "0.5.3"
+version = "0.6.0"
 description = "Analytics: event registry, ingest, funnels and adapter fan-out for the Stapel framework"
 readme = "README.md"
 license = { text = "MIT" }

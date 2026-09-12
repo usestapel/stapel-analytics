@@ -118,6 +118,29 @@ The SDK itself is an optional extra — `pip install
 normally and an upload comes back `pending` with a reason naming the
 missing package.
 
+## The attribution cookie
+
+Where the click identifier comes from when the frontend cannot supply one
+(`attribution.py`, MODULE.md §8). A marketing site on the apex domain writes
+an `HttpOnly` cookie on a paid landing; every request the browser later
+makes to the application carries it, and
+`stapel_analytics.middleware.AttributionCookieMiddleware` — mounted **after**
+the authentication middleware — turns it into one `UserAttribution` row per
+account.
+
+| Key | Default | What it does |
+|---|---|---|
+| `ATTRIBUTION_COOKIE` | `{"NAME": "", "FORMAT": "base64url_json", "FIELDS": {"id": "id", "type": "type", "ts": "ts"}, "FIRST_TOUCH": True, "URL_PARAM": "click_id"}` | The cookie to capture, merged one level deep over these defaults (`FIELDS` too). **`NAME` is empty and that disables capture**: the cookie's name, envelope and consent rule belong to the site that writes it, and a guessed name either finds nothing or decodes something it was never told about. `FORMAT` names the envelope (`base64url_json`: base64url — padding optional — of a JSON object). `FIELDS` says where the click id, the platform and the unix-seconds click time live inside it. `FIRST_TOUCH` is a **decision**: `True` never lets a cookie overwrite a stored attribution, `False` lets the newest click by `clicked_at` win. `URL_PARAM` names the query parameter whose presence means the request already carries an explicit attribution, so the cookie stands down for it. |
+
+A click already past `GOOGLE_ADS_CONVERSION_WINDOW_DAYS` at capture is
+stored with `expired=True` rather than dropped — it is still the honest
+answer to where the account came from, and the flag keeps a conversion path
+from enqueueing an upload that can only be settled `expired`. A cookie that
+does not decode is dropped and counted
+(`analytics.attribution_cookie.malformed`); it can never fail a request.
+`analytics.W013` fires when the cookie is named and the middleware is not
+mounted.
+
 ## The conversion feed
 
 The other door onto the same outbox: instead of this deployment calling the

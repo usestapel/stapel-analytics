@@ -434,6 +434,48 @@ def check_conversion_feed_name(app_configs, **kwargs):
     )]
 
 
+#: Dotted path of the capture middleware, as a host writes it in MIDDLEWARE.
+ATTRIBUTION_MIDDLEWARE = (
+    "stapel_analytics.middleware.AttributionCookieMiddleware"
+)
+
+
+@checks.register(checks.Tags.compatibility)
+def check_attribution_middleware(app_configs, **kwargs):
+    """W013 — the attribution cookie is named and nothing reads it.
+
+    Naming the cookie is the whole configuration of the capture, so a host
+    that named one has decided to capture. Without the middleware mounted
+    that decision costs nothing and does nothing, and the symptom — an
+    attribution table that stays empty — looks exactly like "the marketing
+    site is not setting the cookie", which is a different problem someone
+    will go and debug on a different machine.
+    """
+    from django.conf import settings
+
+    from .attribution import cookie_name
+
+    name = cookie_name()
+    if not name:
+        return []
+    mounted = [
+        entry for entry in (getattr(settings, "MIDDLEWARE", None) or [])
+        if str(entry).endswith("AttributionCookieMiddleware")
+    ]
+    if mounted:
+        return []
+    return [checks.Warning(
+        f"STAPEL_ANALYTICS['ATTRIBUTION_COOKIE']['NAME'] names the cookie "
+        f"{name!r}, but {ATTRIBUTION_MIDDLEWARE} is not in MIDDLEWARE — "
+        "nothing reads it, and the attribution table will stay empty for a "
+        "reason that looks like the marketing site's fault.",
+        hint=f"Add {ATTRIBUTION_MIDDLEWARE!r} to MIDDLEWARE, after the "
+             "authentication middleware (the end of the list is the usual "
+             "answer) — or clear the NAME if capture was not intended.",
+        id="analytics.W013",
+    )]
+
+
 def _pending_conversion_uploads() -> int:
     """Queued uploads, or 0 on a database this check cannot read.
 
@@ -454,6 +496,7 @@ def _pending_conversion_uploads() -> int:
 
 __all__ = [
     "check_adapters",
+    "check_attribution_middleware",
     "check_bridge_targets",
     "check_conversion_feed_name",
     "check_conversion_upload_credentials",

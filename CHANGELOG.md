@@ -4,6 +4,72 @@ All notable changes to stapel-analytics are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Pre-1.0 semver: **minor = breaking**, patch = compatible.
 
+## [0.6.0] — 2026-09-12
+
+### Added — the ad click that produced an account, read off a cookie the server owns
+
+Minor (pre-1.0: minor = breaking, and one shipped behaviour does change —
+see *Changed*). One migration, `0004_userattribution`: a new table, nothing
+altered, nothing dropped.
+
+Until now a click identifier could only reach this module through the door
+the frontend controls: read off the landing URL, posted with a registration.
+That path works when the visitor lands and signs up in the same session on
+the same device, and it is the narrowest point in the funnel. A visitor who
+lands on the marketing site and signs up a week later brings nothing with
+them, and the campaign that paid for them is credited with nothing.
+
+`AttributionCookieMiddleware` (`middleware.py`) + `attribution.py` read a
+cookie the marketing site leaves on the apex domain instead —
+`NAME=base64url({"id": …, "src": "gclid", "ts": <unix seconds>})`,
+`HttpOnly`, which is exactly why the decode has to be a server job — and
+store one `UserAttribution` row per account: `click_id`, `click_id_type`,
+`clicked_at` (the real click time, from `ts`), `captured_at`,
+`source="cookie"`, `expired`.
+
+* configured by `STAPEL_ANALYTICS["ATTRIBUTION_COOKIE"]`
+  (`NAME`/`FORMAT`/`FIELDS`/`FIRST_TOUCH`/`URL_PARAM`), merged one level deep
+  over the shipped defaults. **`NAME` is empty by default and that disables
+  capture**: the cookie belongs to the site that writes it.
+* the middleware runs **after** the view, so it sees whichever of the
+  fleet's two authentication paths resolved the user — a capture in
+  `process_request` would find `AnonymousUser` on exactly the doors that
+  matter. Mount it after the authentication middleware.
+* an **anonymous account** is an account: a guest enrolment can pay, so it is
+  attributed.
+* **first touch wins.** A stored attribution is never overwritten by a
+  cookie, and a request carrying the explicit `URL_PARAM` (the frontend's
+  own attribution) stands the cookie down. `FIRST_TOUCH: False` inverts it to
+  newest-click-by-`clicked_at`.
+* a click already past `GOOGLE_ADS_CONVERSION_WINDOW_DAYS` at capture is
+  stored with `expired=True`, not dropped — the conversion path passes
+  `clicked_at` on, so the 90-day rule stops being the weaker fallback and
+  becomes Google's real one.
+* a malformed cookie is **never** an error: dropped and counted
+  (`analytics.attribution_cookie.malformed`, labelled by reason; captures
+  and expired captures counted too). Nothing a stranger's cookie contains
+  can fail a request, and the whole capture is wrapped besides.
+* `attribution_for(user)` is the accessor a host's conversion path calls; it
+  takes a user object or a bare id.
+* the row is personal data from the first release: `erasure.erase_account`
+  deletes it (new `attribution` count in the receipt) and the DSAR export
+  carries it.
+* `analytics.W013` — the cookie is named and the middleware is not mounted,
+  which looks exactly like "the marketing site is not setting it".
+
+### Changed — the Google feed filters by click-id type
+
+`feed.feed_rows` now selects only the three identifier kinds this file has
+columns for (`gclid`/`gbraid`/`wbraid`). `CLICK_ID_TYPES` in `attribution.py`
+is wider — `yclid`, `fbclid`, `ttclid` are stored, because where an account
+came from is worth knowing whatever platform sent it — and a row carrying
+one of those previously raised `ValueError` inside `row_values` rather than
+being skipped. **Follow-up:** a Yandex Direct feed is its own file with its
+own columns; it is not a widening of this one.
+
+`erasure.erase_account` / `export_account` answer one key more
+(`attribution`), which is why this is a minor rather than a patch.
+
 ## [0.5.3] — 2026-09-08
 
 ### Fixed — the refusals no view raises answer the fleet envelope

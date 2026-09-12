@@ -1,4 +1,4 @@
-"""Models of stapel-analytics — three tables, and the one it does NOT have.
+"""Models of stapel-analytics — four tables, and the one it does NOT have.
 
 The events themselves have **no model here**. They live in
 ``stapel_core.eventstore`` (``store.py``), the fleet's append-only stream
@@ -18,7 +18,13 @@ analytics data — it exists because the delivery is a call to somebody
 else's API, and a conversion lost to their outage is bidding signal the
 advertiser never gets back.
 
-The third is the **feed fetch**: one line saying somebody pulled the
+The third is the **user attribution**: the ad click one account came from,
+read off the cookie a paid landing left on the apex domain
+(``attribution.py``). It is the click identifier the conversion outbox above
+needs weeks later, when the payment happens in a request that carries no
+cookie and no landing URL.
+
+The fourth is the **feed fetch**: one line saying somebody pulled the
 conversion feed, when, and how many rows they got. It exists because the
 feed inverts the delivery — the ad platform reads on its own schedule, and
 nothing in a pull tells the server it happened. Without this row the only
@@ -216,6 +222,74 @@ class ConversionUpload(models.Model):
         return f"{self.click_id_type}:{self.click_id[:12]}… {self.status}"
 
 
+@access.sensitive  # a click id is an advertising identifier of one person
+class UserAttribution(models.Model):
+    """The ad click one account came from. One row per account, at most.
+
+    Written by ``attribution.AttributionCookieMiddleware`` from the cookie a
+    paid landing left on the apex domain, and read by whatever path reports
+    the conversion — which is the point of storing it at all: the payment
+    that is worth bidding on happens weeks later, in a request that carries
+    no cookie and no landing URL.
+
+    ``clicked_at`` is the field the rest of the module exists around. Google
+    measures its ninety days from the CLICK, and until this row existed the
+    only thing a conversion path could offer was the moment the identifier
+    was *captured* — a proxy that is wrong by however long the visitor
+    thought about it. ``expired`` records the verdict as of capture, so a
+    conversion path can skip a click that was already unreportable without
+    recomputing a window it does not own.
+
+    House rules (docs/library-standard.md §3.8): the user is a UUID field,
+    not an FK — the account may live in another service's database, and an
+    advertising record must outlive it by exactly as long as an operator
+    needs to see it. Erasure is not optional and is wired from day one
+    (``erasure.erase_account``).
+    """
+
+    #: FK-less account id. Unique: the question this table answers is "which
+    #: click produced THIS account", and two answers to it is not more
+    #: information, it is an unresolved conflict.
+    user_id = models.UUIDField(unique=True)
+
+    #: The advertising click identifier, opaque and long.
+    click_id = models.CharField(max_length=512)
+    #: Which platform's identifier it is. Wider than ``ConversionUpload``'s
+    #: three on purpose: a ``yclid`` is a real record of where an account
+    #: came from even though the Google feed will never carry it.
+    click_id_type = models.CharField(max_length=8)
+
+    #: When the CLICK happened, as the capture said. The whole reason this
+    #: row beats a captured-at proxy.
+    clicked_at = models.DateTimeField(null=True, blank=True)
+    #: When this server stored it.
+    captured_at = models.DateTimeField()
+
+    #: Which door the record came through: ``cookie`` for this module's
+    #: middleware, a host's own word for a host's own write path. It is what
+    #: answers "how much of our attribution is the wide net" without a
+    #: second table.
+    source = models.CharField(max_length=32, default="cookie")
+
+    #: The click was already past the reporting window when it was captured.
+    #: Stored rather than dropped (attribution.py says why), and flagged so
+    #: nothing downstream enqueues an upload that can only be settled
+    #: ``expired``.
+    expired = models.BooleanField(default=False)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-captured_at",)
+        indexes = [
+            models.Index(fields=["click_id"], name="anl_attr_click_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.click_id_type}:{self.click_id[:12]}… → {self.user_id}"
+
+
 class ConversionFeedFetch(models.Model):
     """One read of the conversion feed. The receipt a pull does not leave.
 
@@ -249,4 +323,9 @@ class ConversionFeedFetch(models.Model):
         return f"{self.at:%Y-%m-%d %H:%M} {self.rows} row(s)"
 
 
-__all__ = ["ConversionFeedFetch", "ConversionUpload", "Funnel"]
+__all__ = [
+    "ConversionFeedFetch",
+    "ConversionUpload",
+    "Funnel",
+    "UserAttribution",
+]

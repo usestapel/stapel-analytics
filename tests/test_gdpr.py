@@ -89,7 +89,12 @@ class TestEraseAccount:
         seed()
         erase_account(USER_ID)
         second = erase_account(USER_ID)
-        assert second == {"events": 0, "anonymous_events": 0, "anonymous_ids": 0}
+        assert second == {
+            "events": 0,
+            "anonymous_events": 0,
+            "anonymous_ids": 0,
+            "attribution": 0,
+        }
 
     def test_a_hash_may_be_passed_directly(self):
         seed()

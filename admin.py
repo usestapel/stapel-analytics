@@ -1,6 +1,6 @@
 """Admin for stapel-analytics.
 
-Two models, because two are all this app owns. The events live in
+Three models, because three are all an operator asks about. The events live in
 ``stapel_core.django.eventstore``'s append-only table and are administered
 there (as an ``@access.ops`` journal), which is the right place: they are
 not this module's data model, they are its storage.
@@ -12,7 +12,7 @@ twice or not at all.
 """
 from django.contrib import admin
 
-from .models import ConversionUpload, Funnel
+from .models import ConversionUpload, Funnel, UserAttribution
 
 
 @admin.register(Funnel)
@@ -49,4 +49,29 @@ class ConversionUploadAdmin(admin.ModelAdmin):
         return False
 
 
-__all__ = ["ConversionUploadAdmin", "FunnelAdmin"]
+@admin.register(UserAttribution)
+class UserAttributionAdmin(admin.ModelAdmin):
+    """Read-only, and for one question: which click produced this account.
+
+    Never editable. The row is evidence about a click that happened on
+    somebody else's server; a hand-typed one is a conversion reported
+    against a campaign that did not pay for it.
+    """
+
+    list_display = ("user_id", "click_id_type", "click_id", "clicked_at",
+                    "captured_at", "source", "expired")
+    list_filter = ("click_id_type", "source", "expired")
+    search_fields = ("click_id", "user_id")
+    ordering = ("-captured_at",)
+    readonly_fields = tuple(
+        field.name for field in UserAttribution._meta.fields
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+__all__ = ["ConversionUploadAdmin", "FunnelAdmin", "UserAttributionAdmin"]

@@ -231,6 +231,41 @@ DEFAULTS = {
     # the sweep never races a row's own backoff and re-attempts it early.
     "CONVERSION_UPLOAD_SCHEDULE": {"minute": "*/15"},
 
+    # ── The attribution cookie (attribution.py, middleware.py) ───────
+    # The advertising cookie a marketing site leaves on the apex domain, so
+    # that every request the browser makes to the application carries the
+    # click that paid for the visit. Merged over these defaults one level
+    # deep (FIELDS too), so a host that only names the cookie keeps the
+    # shipped envelope.
+    #
+    # NAME IS EMPTY AND THAT DISABLES CAPTURE. The cookie is somebody else's
+    # artefact: its name, its envelope and its consent rule belong to the
+    # site that writes it, and a library that guessed a name would either
+    # find nothing or decode a cookie it was never told about. The host
+    # names it; until then the middleware is a no-op per request.
+    #
+    # * NAME        — the cookie to read. Empty = capture off.
+    # * FORMAT      — the envelope. "base64url_json" is the one this release
+    #                 decodes: base64url (padding optional) of a JSON object.
+    # * FIELDS      — where the three values live inside that object:
+    #                 {"id": <click id key>, "type": <platform key>,
+    #                  "ts": <unix seconds key>}.
+    # * FIRST_TOUCH — True (default): a stored attribution is never
+    #                 overwritten by the cookie. False: the newest click by
+    #                 `clicked_at` wins. A DECISION, and attribution.py says
+    #                 why the default is the narrower door.
+    # * URL_PARAM   — a query parameter whose presence means the request
+    #                 already carries an explicit attribution (the frontend
+    #                 passing it on a registration or an OAuth authorize);
+    #                 the cookie stands down for that request. Empty = never.
+    "ATTRIBUTION_COOKIE": {
+        "NAME": "",
+        "FORMAT": "base64url_json",
+        "FIELDS": {"id": "id", "type": "type", "ts": "ts"},
+        "FIRST_TOUCH": True,
+        "URL_PARAM": "click_id",
+    },
+
     # ── The conversion feed (feed.py) ────────────────────────────────
     # Bearer/query token the feed endpoint demands. A SECRET, so the
     # environment door stays open for the same reason the credentials
