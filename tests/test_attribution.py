@@ -8,6 +8,8 @@ end in "ignored and counted", never in an exception a request could see.
 import base64
 import json
 from datetime import timedelta
+from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -132,7 +134,7 @@ class TestDecode:
         resolved = attribution.cookie_settings()
         assert resolved["FIELDS"] == {"id": "id", "type": "type", "ts": "ts"}
         assert resolved["FORMAT"] == attribution.FORMAT_BASE64URL_JSON
-        assert resolved["FIRST_TOUCH"] is True
+        assert resolved["FIRST_TOUCH"] is False
 
 
 @pytest.mark.django_db
@@ -150,36 +152,89 @@ class TestRecord:
         assert row.expired is False
         assert row.captured_at is not None
 
-    def test_first_touch_never_overwrites(self, cookie_settings, user):
+    def test_a_newer_click_replaces_the_stored_one(self, cookie_settings, user):
+        """Last touch. The click Google has to be told about is the one that
+        made the person pay, and that is the newest, not the first."""
         first = timezone.now() - timedelta(days=10)
         attribution.record(
             user, attribution.decode(envelope(claim(click_id="first", ts=first)))
         )
-        row, created = attribution.record(
+        row, written = attribution.record(
             user, attribution.decode(envelope(claim(click_id="second")))
         )
-        assert created is False
-        assert row.click_id == "first"
+        assert written is True
+        assert row.click_id == "second"
         assert UserAttribution.objects.count() == 1
+        assert attribution.attribution_for(user).click_id == "second"
 
-    def test_last_touch_takes_a_newer_click_only(self, cookie_settings, user):
-        cookie_settings(FIRST_TOUCH=False)
-        older = timezone.now() - timedelta(days=10)
+    def test_an_older_click_is_ignored(self, cookie_settings, user):
+        stored = timezone.now() - timedelta(days=2)
         attribution.record(
-            user, attribution.decode(envelope(claim(click_id="first", ts=older)))
+            user, attribution.decode(envelope(claim(click_id="stored", ts=stored)))
+        )
+        row, written = attribution.record(
+            user,
+            attribution.decode(
+                envelope(claim(click_id="older", ts=stored - timedelta(days=1)))
+            ),
+        )
+        assert written is False
+        assert row.click_id == "stored"
+
+    def test_an_equally_old_click_is_ignored(self, cookie_settings, user):
+        """Not `>=`: a repeat of the SAME click is the ordinary case — the
+        cookie rides every request — and rewriting the row on each one would
+        be a write per request for no new fact."""
+        stored = timezone.now().replace(microsecond=0) - timedelta(days=2)
+        attribution.record(
+            user, attribution.decode(envelope(claim(click_id="stored", ts=stored)))
+        )
+        row, written = attribution.record(
+            user, attribution.decode(envelope(claim(click_id="twin", ts=stored)))
+        )
+        assert written is False
+        assert row.click_id == "stored"
+
+    def test_first_touch_can_still_be_asked_for(self, cookie_settings, user):
+        """The flag survives the flip: a host that wants the first click is
+        one setting away from it."""
+        cookie_settings(FIRST_TOUCH=True)
+        first = timezone.now() - timedelta(days=10)
+        attribution.record(
+            user, attribution.decode(envelope(claim(click_id="first", ts=first)))
+        )
+        row, written = attribution.record(
+            user, attribution.decode(envelope(claim(click_id="second")))
+        )
+        assert written is False
+        assert row.click_id == "first"
+
+    def test_a_record_with_no_click_time_yields_to_a_click_after_its_capture(
+        self, cookie_settings, user
+    ):
+        """A stored row whose click time is unknown (the explicit door often
+        has only `captured_at`) is beaten by the one comparison that holds
+        without it: a click that happened AFTER that row was captured."""
+        captured = timezone.now() - timedelta(days=5)
+        UserAttribution.objects.create(
+            user_id=user.pk,
+            click_id="timeless",
+            click_id_type="gclid",
+            clicked_at=None,
+            captured_at=captured,
+            source="signup",
         )
         attribution.record(
             user,
             attribution.decode(
-                envelope(claim(click_id="older", ts=older - timedelta(days=1)))
+                envelope(claim(click_id="before", ts=captured - timedelta(days=1)))
             ),
         )
-        assert attribution.attribution_for(user).click_id == "first"
+        assert attribution.attribution_for(user).click_id == "timeless"
         attribution.record(
-            user, attribution.decode(envelope(claim(click_id="newer")))
+            user, attribution.decode(envelope(claim(click_id="after")))
         )
-        assert attribution.attribution_for(user).click_id == "newer"
-        assert UserAttribution.objects.count() == 1
+        assert attribution.attribution_for(user).click_id == "after"
 
     def test_a_click_past_the_window_is_stored_as_expired(
         self, cookie_settings, user
@@ -254,11 +309,11 @@ class TestMiddleware:
         self._run(self._request(user, cookie=envelope(claim())))
         assert UserAttribution.objects.count() == 0
 
-    def test_the_url_attribution_wins_over_the_cookie(
+    def test_the_url_attribution_stands_the_cookie_down_on_that_request(
         self, cookie_settings, user
     ):
-        """The frontend passing click_id on this very request is the explicit
-        door; the cookie stands down rather than racing it."""
+        """The explicit write is in flight on this very request; there is
+        nothing stored yet to compare it against, so the cookie waits."""
         self._run(
             self._request(
                 user, cookie=envelope(claim()), query="click_id=URL&click_id_type=gclid"
@@ -266,19 +321,85 @@ class TestMiddleware:
         )
         assert UserAttribution.objects.count() == 0
 
-    def test_a_stored_attribution_is_never_overwritten(
+    def test_the_cookie_lands_on_the_next_request_without_the_parameter(
+        self, cookie_settings, user
+    ):
+        """Standing down costs one request, not the capture: the middleware
+        runs the rule again on the next one."""
+        self._run(
+            self._request(
+                user, cookie=envelope(claim()), query="click_id=URL&click_id_type=gclid"
+            )
+        )
+        self._run(self._request(user, cookie=envelope(claim())))
+        assert attribution.attribution_for(user).click_id == "EAIaIQclick"
+
+    def test_a_newer_click_overwrites_a_stored_explicit_attribution(
+        self, cookie_settings, user
+    ):
+        """Which DOOR the stored record came through no longer decides it —
+        which CLICK is newer does. Google needs the click that made the
+        person pay."""
+        UserAttribution.objects.create(
+            user_id=user.pk,
+            click_id="from-the-url",
+            click_id_type="gclid",
+            clicked_at=timezone.now() - timedelta(days=30),
+            captured_at=timezone.now() - timedelta(days=30),
+            source="signup",
+        )
+        self._run(self._request(user, cookie=envelope(claim())))
+        assert attribution.attribution_for(user).click_id == "EAIaIQclick"
+
+    def test_an_older_click_leaves_a_stored_explicit_attribution_alone(
         self, cookie_settings, user
     ):
         UserAttribution.objects.create(
             user_id=user.pk,
             click_id="from-the-url",
             click_id_type="gclid",
-            clicked_at=timezone.now() - timedelta(days=1),
-            captured_at=timezone.now() - timedelta(days=1),
+            clicked_at=timezone.now() - timedelta(hours=1),
+            captured_at=timezone.now() - timedelta(hours=1),
             source="signup",
         )
-        self._run(self._request(user, cookie=envelope(claim())))
+        self._run(
+            self._request(
+                user,
+                cookie=envelope(claim(ts=timezone.now() - timedelta(days=9))),
+            )
+        )
         assert attribution.attribution_for(user).click_id == "from-the-url"
+
+    def test_the_rule_runs_on_every_request_not_only_the_first(
+        self, cookie_settings, user
+    ):
+        """0.6.0 captured once and never looked again. A person who clicks a
+        second ad while already signed in must move the account onto it."""
+        first = timezone.now() - timedelta(days=20)
+        self._run(
+            self._request(
+                user, cookie=envelope(claim(click_id="first", ts=first))
+            )
+        )
+        self._run(
+            self._request(user, cookie=envelope(claim(click_id="second")))
+        )
+        assert attribution.attribution_for(user).click_id == "second"
+        assert UserAttribution.objects.count() == 1
+
+    def test_a_repeat_of_the_same_cookie_writes_nothing(
+        self, cookie_settings, user
+    ):
+        """Cheap is the whole reason this can run on every request: the
+        comparison is a read, and an unchanged cookie never reaches a write."""
+        cookie = envelope(claim(ts=timezone.now() - timedelta(days=1)))
+        self._run(self._request(user, cookie=cookie))
+        stored = attribution.attribution_for(user)
+        for _ in range(3):
+            self._run(self._request(user, cookie=cookie))
+        again = attribution.attribution_for(user)
+        assert again.updated_at == stored.updated_at
+        assert again.click_id == stored.click_id
 
     def test_a_malformed_cookie_is_counted_and_the_request_stands(
         self, cookie_settings, user
@@ -300,8 +421,282 @@ class TestMiddleware:
 
 
 @pytest.mark.django_db
+class TestHistory:
+    """Last touch decides the upload; the history is what keeps reporting
+    able to answer "and which click STARTED this account"."""
+
+    def _click(self, user, click_id, days_ago):
+        attribution.record(
+            user,
+            attribution.decode(
+                envelope(
+                    claim(
+                        click_id=click_id,
+                        ts=timezone.now() - timedelta(days=days_ago),
+                    )
+                )
+            ),
+        )
+
+    def test_the_superseded_click_is_kept(self, cookie_settings, user):
+        self._click(user, "first", 30)
+        self._click(user, "second", 1)
+        row = attribution.attribution_for(user)
+        assert row.click_id == "second"
+        assert [entry["click_id"] for entry in row.history] == ["first"]
+        assert row.history[0]["click_id_type"] == "gclid"
+        assert row.history[0]["clicked_at"] is not None
+        assert row.history[0]["source"] == "cookie"
+
+    def test_an_ignored_click_is_not_history(self, cookie_settings, user):
+        """History is the record of what this account WAS attributed to, not
+        a log of every cookie that rode in."""
+        self._click(user, "stored", 1)
+        self._click(user, "older", 30)
+        assert attribution.attribution_for(user).history == []
+
+    def test_the_history_is_capped(self, cookie_settings, user):
+        for index in range(attribution.HISTORY_LIMIT + 5):
+            self._click(user, f"click-{index}", 100 - index)
+        row = attribution.attribution_for(user)
+        assert len(row.history) == attribution.HISTORY_LIMIT
+
+    def test_the_first_touch_survives_the_cap(self, cookie_settings, user):
+        """A cap that evicted the oldest entry would throw away the one thing
+        the history exists for."""
+        for index in range(attribution.HISTORY_LIMIT + 5):
+            self._click(user, f"click-{index}", 100 - index)
+        row = attribution.attribution_for(user)
+        assert row.history[0]["click_id"] == "click-0"
+        assert row.history[-1]["click_id"] == "click-13"
+        assert row.click_id == "click-14"
+
+    def test_the_record_carries_its_history(self, cookie_settings, user):
+        self._click(user, "first", 30)
+        self._click(user, "second", 1)
+        as_dict = attribution.attribution_as_dict(
+            attribution.attribution_for(user)
+        )
+        assert as_dict["click_id"] == "second"
+        assert [entry["click_id"] for entry in as_dict["history"]] == ["first"]
+
+
+@pytest.mark.django_db
+class TestTheAccountLifeCycle:
+    def test_an_upgraded_anonymous_account_keeps_its_row(
+        self, cookie_settings, db
+    ):
+        """A guest that signs up in place keeps its user id, so the row it
+        was attributed under is the same row — nothing to move, and nothing
+        may be lost."""
+        from django.contrib.auth import get_user_model
+
+        guest = get_user_model().objects.create(username="guest-9a2", email="")
+        attribution.record(
+            guest,
+            attribution.decode(
+                envelope(
+                    claim(click_id="as-a-guest", ts=timezone.now() - timedelta(days=9))
+                )
+            ),
+        )
+        guest.email = "signed-up@example.com"
+        guest.username = "signed-up"
+        guest.save()
+        row = attribution.attribution_for(guest)
+        assert row is not None
+        assert row.click_id == "as-a-guest"
+        # And the rule keeps running on the upgraded account.
+        attribution.record(
+            guest, attribution.decode(envelope(claim(click_id="after-signup")))
+        )
+        row = attribution.attribution_for(guest)
+        assert row.click_id == "after-signup"
+        assert [entry["click_id"] for entry in row.history] == ["as-a-guest"]
+
+    def _row(self, user_id, click_id, days_ago, *, history=None):
+        moment = timezone.now() - timedelta(days=days_ago)
+        return UserAttribution.objects.create(
+            user_id=user_id,
+            click_id=click_id,
+            click_id_type="gclid",
+            clicked_at=moment,
+            captured_at=moment,
+            source="cookie",
+            history=history or [],
+        )
+
+    def test_a_merged_guest_hands_its_row_to_a_survivor_with_none(
+        self, cookie_settings, user, other_user
+    ):
+        self._row(user.pk, "guest-click", 5)
+        moved = attribution.merge_accounts(user.pk, other_user.pk)
+        assert moved == 1
+        assert attribution.attribution_for(user) is None
+        assert attribution.attribution_for(other_user).click_id == "guest-click"
+
+    def test_a_newer_guest_click_becomes_the_survivors(
+        self, cookie_settings, user, other_user
+    ):
+        self._row(user.pk, "guest-click", 1)
+        self._row(other_user.pk, "survivor-click", 40)
+        attribution.merge_accounts(user.pk, other_user.pk)
+        survivor = attribution.attribution_for(other_user)
+        assert survivor.click_id == "guest-click"
+        assert [entry["click_id"] for entry in survivor.history] == [
+            "survivor-click"
+        ]
+        assert UserAttribution.objects.count() == 1
+
+    def test_an_older_guest_click_only_joins_the_history(
+        self, cookie_settings, user, other_user
+    ):
+        self._row(user.pk, "guest-click", 40)
+        self._row(other_user.pk, "survivor-click", 1)
+        attribution.merge_accounts(user.pk, other_user.pk)
+        survivor = attribution.attribution_for(other_user)
+        assert survivor.click_id == "survivor-click"
+        assert [entry["click_id"] for entry in survivor.history] == ["guest-click"]
+
+    def test_the_guests_own_history_travels_with_it(
+        self, cookie_settings, user, other_user
+    ):
+        older = (timezone.now() - timedelta(days=90)).isoformat()
+        self._row(
+            user.pk,
+            "guest-click",
+            40,
+            history=[
+                {
+                    "click_id": "guest-first-touch",
+                    "click_id_type": "gclid",
+                    "clicked_at": older,
+                    "captured_at": older,
+                    "source": "cookie",
+                    "expired": False,
+                }
+            ],
+        )
+        self._row(other_user.pk, "survivor-click", 1)
+        attribution.merge_accounts(user.pk, other_user.pk)
+        survivor = attribution.attribution_for(other_user)
+        assert [entry["click_id"] for entry in survivor.history] == [
+            "guest-first-touch",
+            "guest-click",
+        ]
+
+    def test_the_merge_is_idempotent(self, cookie_settings, user, other_user):
+        self._row(user.pk, "guest-click", 1)
+        self._row(other_user.pk, "survivor-click", 40)
+        assert attribution.merge_accounts(user.pk, other_user.pk) == 1
+        assert attribution.merge_accounts(user.pk, other_user.pk) == 0
+        survivor = attribution.attribution_for(other_user)
+        assert survivor.click_id == "guest-click"
+        assert [entry["click_id"] for entry in survivor.history] == [
+            "survivor-click"
+        ]
+
+    def test_a_merge_with_nothing_to_carry_is_a_no_op(
+        self, cookie_settings, user, other_user
+    ):
+        assert attribution.merge_accounts(user.pk, other_user.pk) == 0
+
+    def test_the_user_merged_subscriber_carries_the_attribution(
+        self, cookie_settings, user, other_user
+    ):
+        """The seam: a merge arriving on the bus must move the marketing
+        record too, or the survivor pays and the click is on a row nobody
+        will ever read."""
+        from stapel_analytics.actions import handle_user_merged
+
+        self._row(user.pk, "guest-click", 1)
+        self._row(other_user.pk, "survivor-click", 40)
+        handle_user_merged(
+            SimpleNamespace(
+                event_id="evt-merge",
+                payload={
+                    "from_user_id": str(user.pk),
+                    "into_user_id": str(other_user.pk),
+                },
+            )
+        )
+        survivor = attribution.attribution_for(other_user)
+        assert survivor.click_id == "guest-click"
+        assert [entry["click_id"] for entry in survivor.history] == [
+            "survivor-click"
+        ]
+
+
+@pytest.mark.django_db
 class TestTheConversionPath:
     """What the stored click is for: the 90-day rule becomes the real one."""
+
+    def test_the_conversion_is_enqueued_against_the_last_click(
+        self, cookie_settings, user
+    ):
+        from stapel_analytics import conversions
+
+        attribution.record(
+            user,
+            attribution.decode(
+                envelope(
+                    claim(click_id="first", ts=timezone.now() - timedelta(days=30))
+                )
+            ),
+        )
+        attribution.record(
+            user,
+            attribution.decode(
+                envelope(
+                    claim(click_id="paid-for-it", ts=timezone.now() - timedelta(days=2))
+                )
+            ),
+        )
+        upload, created = conversions.enqueue_for_user(
+            user,
+            conversion_action="customers/1/conversionActions/2",
+            conversion_at=timezone.now(),
+            value=Decimal("19.00"),
+            currency="usd",
+        )
+        assert created is True
+        assert upload.click_id == "paid-for-it"
+        assert upload.click_id_type == "gclid"
+        assert upload.clicked_at == attribution.attribution_for(user).clicked_at
+        assert upload.currency == "USD"
+
+    def test_an_account_with_no_click_enqueues_nothing(
+        self, cookie_settings, user
+    ):
+        from stapel_analytics import conversions
+
+        assert (
+            conversions.enqueue_for_user(
+                user,
+                conversion_action="customers/1/conversionActions/2",
+                conversion_at=timezone.now(),
+            )
+            is None
+        )
+        assert ConversionUpload.objects.count() == 0
+
+    def test_a_click_the_google_feed_cannot_carry_enqueues_nothing(
+        self, cookie_settings, user
+    ):
+        from stapel_analytics import conversions
+
+        attribution.record(
+            user, attribution.decode(envelope(claim(src="yclid")))
+        )
+        assert (
+            conversions.enqueue_for_user(
+                user,
+                conversion_action="customers/1/conversionActions/2",
+                conversion_at=timezone.now(),
+            )
+            is None
+        )
+        assert ConversionUpload.objects.count() == 0
 
     def test_the_stored_click_time_drives_the_window(self, cookie_settings, user):
         clicked = timezone.now() - timedelta(days=100)

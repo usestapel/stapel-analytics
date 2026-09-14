@@ -443,6 +443,61 @@ def enqueue(
     )
 
 
+def enqueue_for_user(
+    user,
+    *,
+    conversion_action="",
+    conversion_at,
+    value=None,
+    currency="",
+):
+    """Enqueue a conversion against the account's CURRENT click.
+
+    The door a host's payment path should use instead of reading the
+    attribution row and re-typing three arguments, because two of those
+    arguments are the ones that get it wrong:
+
+    * the **click id** must be the one stored NOW. Under last touch
+      (``attribution.record``) that is the newest click the person made, and
+      it is the one the platform is being asked to credit. A path that
+      cached an identifier at registration and enqueued it at payment would
+      report the click that opened the account rather than the one that
+      closed the sale — which is the whole of the ruling this exists for.
+    * the **click time** must travel with it. ``clicked_at`` is what turns
+      the 90-day window into Google's own rule rather than this module's
+      weaker fallback (``window_verdict``), and it is on the row.
+
+    Returns ``(row, created)`` from :func:`enqueue`, or ``None`` when there
+    is nothing to report — no attribution (the ordinary answer: most
+    accounts never came from an ad) or an identifier this file has no column
+    for. Neither is an error, and neither is a warning: a ``yclid`` is a
+    correct record of where an account came from and a Yandex feed is a
+    different file.
+    """
+    from .attribution import attribution_for
+
+    row = attribution_for(user)
+    if row is None or not row.click_id:
+        return None
+    if row.click_id_type not in CLICK_ID_FIELDS:
+        logger.info(
+            "analytics: account %s is attributed to a %s click, which this "
+            "feed has no column for — no conversion enqueued",
+            getattr(user, "pk", user),
+            row.click_id_type or "typeless",
+        )
+        return None
+    return enqueue(
+        click_id=row.click_id,
+        click_id_type=row.click_id_type,
+        conversion_action=conversion_action,
+        conversion_at=conversion_at,
+        clicked_at=row.clicked_at,
+        value=value,
+        currency=currency,
+    )
+
+
 def _backoff(attempts: int) -> timedelta:
     """Exponential, capped. The cap is what keeps a long outage bounded."""
     from .conf import analytics_settings
@@ -584,6 +639,7 @@ __all__ = [
     "deliver",
     "due",
     "enqueue",
+    "enqueue_for_user",
     "expire_stale",
     "expiry_verdict",
     "google_datetime",

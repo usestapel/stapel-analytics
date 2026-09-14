@@ -277,6 +277,20 @@ class UserAttribution(models.Model):
     #: ``expired``.
     expired = models.BooleanField(default=False)
 
+    #: Every click this account was attributed to BEFORE the current one,
+    #: oldest first — one entry per superseded record, in the shape
+    #: ``attribution_as_dict`` uses minus the user id. The columns above
+    #: answer "which click do we report", which under last touch is the
+    #: newest; this answers "and which click started this account", which no
+    #: amount of reporting can reconstruct once it has been overwritten.
+    #:
+    #: A JSON column rather than a second table on purpose: it is read by
+    #: whoever reads the row, never queried across accounts, and it is
+    #: bounded (``attribution.HISTORY_LIMIT``) — three properties that make a
+    #: table a join nobody needed. The cap keeps the FIRST entry whatever
+    #: else it drops (``attribution._trim_history``).
+    history = models.JSONField(default=list, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

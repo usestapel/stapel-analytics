@@ -4,6 +4,14 @@
 site left on the apex domain into the account's stored attribution
 (``attribution.py`` holds the rule and the decode; this holds the placement).
 
+**It runs the rule on every authenticated request, not only the first.**
+Through 0.6.0 a stored attribution ended the matter, so a person who came
+back through a second ad and then subscribed was reported to the platform as
+the first ad's conversion. Last touch (0.7.0) means the comparison has to
+happen again each time, and it is affordable because the ordinary answer is
+reached with one indexed SELECT and no write: the cookie the account is
+already attributed to is not newer than itself.
+
 **It works on the way out, not on the way in.** The user of a request is not
 a settled fact until the view has run: this fleet authenticates through a
 middleware for JWT-carrying requests *and* through DRF authenticators for

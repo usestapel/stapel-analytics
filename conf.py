@@ -250,19 +250,28 @@ DEFAULTS = {
     # * FIELDS      — where the three values live inside that object:
     #                 {"id": <click id key>, "type": <platform key>,
     #                  "ts": <unix seconds key>}.
-    # * FIRST_TOUCH — True (default): a stored attribution is never
-    #                 overwritten by the cookie. False: the newest click by
-    #                 `clicked_at` wins. A DECISION, and attribution.py says
-    #                 why the default is the narrower door.
+    # * FIRST_TOUCH — False (default, and it changed in 0.7.0): the newest
+    #                 click by `clicked_at` wins, whichever door it came
+    #                 through, and the one it replaced is kept in `history`.
+    #                 True restores the 0.6.0 rule — a stored attribution is
+    #                 never overwritten. A DECISION, and attribution.py says
+    #                 why the default is the LAST click: the platform is
+    #                 being told which click produced a payment, and a
+    #                 person who came back through a second ad was bought
+    #                 twice by the campaign that closed the sale.
     # * URL_PARAM   — a query parameter whose presence means the request
     #                 already carries an explicit attribution (the frontend
     #                 passing it on a registration or an OAuth authorize);
-    #                 the cookie stands down for that request. Empty = never.
+    #                 the cookie stands down for that ONE request, because
+    #                 the explicit write is still in flight and there is
+    #                 nothing to compare against yet. From the next request
+    #                 on, the ordinary rule decides between them by click
+    #                 time. Empty = never.
     "ATTRIBUTION_COOKIE": {
         "NAME": "",
         "FORMAT": "base64url_json",
         "FIELDS": {"id": "id", "type": "type", "ts": "ts"},
-        "FIRST_TOUCH": True,
+        "FIRST_TOUCH": False,
         "URL_PARAM": "click_id",
     },
 

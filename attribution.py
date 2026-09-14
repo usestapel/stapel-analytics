@@ -23,14 +23,29 @@ read it, exfiltrate it, or forge one. That makes the decode a server job by
 construction, and it makes this module — not the frontend — the place the
 rule lives.
 
-**First touch wins, and that is a decision.** A stored attribution is never
-overwritten by a cookie. The identifier already on the account came through
-a narrower, more explicit door (a URL the visitor actually landed on, posted
-by code we wrote) and it is the one a human would name if asked which click
-produced the account. The cookie is the wide net underneath it. With
-``FIRST_TOUCH`` off the newest click by ``clicked_at`` wins instead — which
-is the other defensible answer, and the reason it is a setting rather than a
-constant.
+**Last touch wins, and that is a decision** (it was first touch through
+0.6.0). The question this record answers is not "where did we first meet
+this person", it is "which click should the ad platform be paid for" — and
+that is the click that made them pay. A visitor who landed in July, came
+back through a second ad in September and subscribed the same evening was
+bought by the September campaign; crediting July tells Smart Bidding to keep
+funding an ad that did not close anything, and starves the one that did.
+
+Newer is decided by ``clicked_at`` and by nothing else — never by arrival
+order, because a retry, a second tab and a proxy all reorder arrival and
+none of them reorders the clock. Equal is not newer: the cookie rides every
+request, so a repeat of the same click is the ordinary case and must not
+cost a write. Which DOOR a record came through stops being the tiebreaker:
+an explicit attribution the frontend posted keeps its precedence over the
+cookie only while it is also the newer click. ``FIRST_TOUCH: True`` restores
+the old rule for a host that wants it.
+
+**The first touch is still kept.** Overwriting is what the ad platform
+needs; forgetting is not what reporting needs. Each superseded record is
+appended to ``history`` on the row — bounded at :data:`HISTORY_LIMIT`, and
+the cap drops from the middle so the FIRST entry survives however many
+clicks follow it. A cap that evicted the oldest would throw away the one
+thing the history exists for.
 
 **Ninety days is the platform's rule, not ours, and it is enforced early.**
 Google refuses a conversion whose click is older than
@@ -83,11 +98,21 @@ FORMAT_BASE64URL_JSON = "base64url_json"
 #: record from its own registration path says so with its own word.
 SOURCE_COOKIE = "cookie"
 
+#: How many superseded clicks one row remembers. Ten is a number, not a
+#: law: it is well past what any account plausibly accumulates and small
+#: enough that the column stays a column. The FIRST entry is never the one
+#: dropped — :func:`_trim_history`.
+HISTORY_LIMIT = 10
+
 #: Metric names. Counted rather than logged per request: a malformed cookie
 #: is a rate, and a log line per request would be a rate nobody can read.
 METRIC_MALFORMED = "analytics.attribution_cookie.malformed"
 METRIC_CAPTURED = "analytics.attribution_cookie.captured"
 METRIC_EXPIRED = "analytics.attribution_cookie.expired"
+#: A newer click took an account off an attribution it already had. The rate
+#: that says how much of the funnel is multi-touch — and the one an operator
+#: looks at first if last touch ever has to be argued about again.
+METRIC_REPLACED = "analytics.attribution_cookie.replaced"
 
 
 # ── Configuration ────────────────────────────────────────────────────
@@ -122,15 +147,25 @@ def is_enabled() -> bool:
 
 
 def first_touch() -> bool:
-    return bool(cookie_settings().get("FIRST_TOUCH", True))
+    """Whether this deployment keeps the FIRST click instead of the last.
+
+    Off by default since 0.7.0. Read per call rather than cached: a test and
+    a management command both change it under a running process.
+    """
+    return bool(cookie_settings().get("FIRST_TOUCH", False))
 
 
 def url_parameter() -> str:
     """Query parameter whose presence means the URL already said it.
 
-    A request that carries the explicit attribution the frontend passes is
-    not a request to capture a cookie on: the explicit value is about to be
-    stored (or was, by the view this middleware wraps), and it wins.
+    The cookie stands down on that ONE request, and the reason is narrower
+    than it was in 0.6.0: the explicit write is in flight — being made by
+    the view this middleware wraps, or by another service entirely — so
+    there is nothing stored yet to compare click times against, and a
+    comparison against nothing is how the wide net quietly wins a race it
+    should have had to earn. From the next request on the ordinary rule
+    applies and the newer click takes the account, whichever door it came
+    through. Standing down therefore costs one request, never the capture.
     """
     return str(cookie_settings().get("URL_PARAM") or "").strip()
 
@@ -294,13 +329,101 @@ def is_expired(clicked_at, *, now=None) -> bool:
     return (now or timezone.now()) - clicked_at > window()
 
 
-def record(user, decoded, *, source=SOURCE_COOKIE, now=None):
-    """Store *decoded* against *user*. Returns ``(row, created)`` or ``None``.
+#: The columns one attribution occupies, in the order a record is copied.
+#: Named once so ``record`` and ``merge_accounts`` cannot drift apart on
+#: which fields a click actually consists of.
+RECORD_FIELDS = (
+    "click_id",
+    "click_id_type",
+    "clicked_at",
+    "captured_at",
+    "source",
+    "expired",
+)
 
-    First touch wins: an existing row is returned untouched. With
-    ``FIRST_TOUCH`` off it is replaced only by a strictly newer click —
-    "newer" by ``clicked_at``, never by arrival order, because retries and a
-    second tab reorder arrival and neither reorders the clock.
+
+def is_newer(clicked_at, row) -> bool:
+    """Whether *clicked_at* is PROVABLY a later click than *row*'s.
+
+    Provably, because a missing timestamp is the one thing that says
+    nothing at all and must therefore never decide a winner:
+
+    * a candidate with no click time loses. It cannot be shown to be newer,
+      and "arrived later" is not "clicked later".
+    * a stored row with no click time — the ordinary shape of the explicit
+      door, which often knows only when the identifier was handed over — is
+      beaten only by a click that happened after that row was *captured*.
+      A click later than the capture is necessarily later than the click
+      the capture recorded, whenever that was; anything earlier cannot be
+      ordered against it at all.
+    * equal loses. The cookie rides every request, so the same click
+      arriving again is the common case, not a new fact.
+    """
+    if clicked_at is None:
+        return False
+    if row.clicked_at is not None:
+        return clicked_at > row.clicked_at
+    return row.captured_at is not None and clicked_at > row.captured_at
+
+
+def _history_entry(row) -> dict:
+    """One superseded record, in the shape ``attribution_as_dict`` uses."""
+    return {
+        "click_id": row.click_id,
+        "click_id_type": row.click_id_type,
+        "clicked_at": row.clicked_at.isoformat() if row.clicked_at else None,
+        "captured_at": row.captured_at.isoformat() if row.captured_at else None,
+        "source": row.source,
+        "expired": bool(row.expired),
+    }
+
+
+def _history_order(entry):
+    """Sort key for a history entry: its click time, then its capture."""
+    for key in ("clicked_at", "captured_at"):
+        value = entry.get(key) if isinstance(entry, dict) else None
+        if value:
+            try:
+                moment = datetime.fromisoformat(str(value))
+            except (TypeError, ValueError):
+                continue
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=dt_timezone.utc)
+            return moment
+    return datetime.min.replace(tzinfo=dt_timezone.utc)
+
+
+def _trim_history(entries):
+    """At most :data:`HISTORY_LIMIT` entries, and never at the first one's cost.
+
+    A plain "keep the last ten" would evict the FIRST touch on the eleventh
+    click, which is precisely the entry this column exists to keep. So the
+    cap drops from the middle: the oldest record stays, and the most recent
+    ``HISTORY_LIMIT - 1`` stay with it.
+    """
+    entries = list(entries)
+    if len(entries) <= HISTORY_LIMIT:
+        return entries
+    return [entries[0], *entries[1 - HISTORY_LIMIT:]]
+
+
+def record(user, decoded, *, source=SOURCE_COOKIE, now=None):
+    """Store *decoded* against *user*. Returns ``(row, written)`` or ``None``.
+
+    Last touch wins: a stored attribution is replaced by a **strictly newer**
+    click (:func:`is_newer`), and the record it replaced is appended to the
+    row's ``history`` so the first touch stays readable. ``FIRST_TOUCH``
+    restores the 0.6.0 rule, under which an existing row is returned
+    untouched whatever it holds.
+
+    ``written`` — the second element — is ``True`` when the row was created
+    **or replaced**, which is the change 0.7.0 makes to this signature. It
+    used to mean ``created``, and a caller that only ever saw first writes
+    could not tell an overwrite from a no-op.
+
+    The no-op path is one SELECT and no write, which is what makes it
+    affordable for the middleware to run this on every authenticated
+    request rather than only on the first one.
     """
     from .models import UserAttribution
 
@@ -324,40 +447,113 @@ def record(user, decoded, *, source=SOURCE_COOKIE, now=None):
         "source": str(source or SOURCE_COOKIE)[:32],
         "expired": is_expired(clicked_at, now=moment),
     }
-    row, created = UserAttribution.objects.get_or_create(
-        user_id=key, defaults=fields
-    )
-    if created:
-        _counter(METRIC_CAPTURED, click_id_type=fields["click_id_type"])
-        if fields["expired"]:
-            # Loud enough to find, quiet enough not to page: a click that
-            # arrived already unreportable is a fact about the campaign's
-            # latency, not a fault of this deployment.
-            _counter(METRIC_EXPIRED, click_id_type=fields["click_id_type"])
-            logger.info(
-                "analytics: captured an attribution whose click (%s) is "
-                "already past the reporting window — stored as expired",
-                clicked_at.isoformat() if clicked_at else "unknown",
-            )
-        return row, True
+
+    row = UserAttribution.objects.filter(user_id=key).first()
+    if row is None:
+        # `get_or_create` rather than `create`: two requests of the same
+        # browser can reach an unattributed account at once, and the unique
+        # constraint is the thing that decides. The loser falls through to
+        # the comparison below against the row that won.
+        row, created = UserAttribution.objects.get_or_create(
+            user_id=key, defaults={**fields, "history": []}
+        )
+        if created:
+            _counter(METRIC_CAPTURED, click_id_type=fields["click_id_type"])
+            if fields["expired"]:
+                # Loud enough to find, quiet enough not to page: a click that
+                # arrived already unreportable is a fact about the campaign's
+                # latency, not a fault of this deployment.
+                _counter(METRIC_EXPIRED, click_id_type=fields["click_id_type"])
+                logger.info(
+                    "analytics: captured an attribution whose click (%s) is "
+                    "already past the reporting window — stored as expired",
+                    clicked_at.isoformat() if clicked_at else "unknown",
+                )
+            return row, True
 
     if first_touch():
         return row, False
-    if clicked_at is None or row.clicked_at is None or clicked_at <= row.clicked_at:
+    if not is_newer(clicked_at, row):
+        # The exit nearly every request takes: a read, a comparison, and
+        # nothing written.
         return row, False
+
+    superseded = _history_entry(row)
     for name, value in fields.items():
         setattr(row, name, value)
-    row.save(update_fields=[*fields, "updated_at"])
-    return row, False
+    row.history = _trim_history([*(row.history or []), superseded])
+    row.save(update_fields=[*fields, "history", "updated_at"])
+    _counter(METRIC_REPLACED, click_id_type=fields["click_id_type"])
+    if fields["expired"]:
+        _counter(METRIC_EXPIRED, click_id_type=fields["click_id_type"])
+    return row, True
+
+
+def merge_accounts(from_user_id, into_user_id) -> int:
+    """Carry a merged guest's attribution onto the survivor. Rows moved.
+
+    ``user.merged`` (stapel-auth folding a guest enrolment into an existing
+    account) is the one place a second attribution for the same person shows
+    up. Without this the guest's click stays on a row keyed to an id nothing
+    will ever look up again — and that click is frequently the paid one,
+    because the guest half is the half that came in from an ad.
+
+    The same rule as everywhere else decides which click the survivor ends
+    up reporting: the newer one, by :func:`is_newer`. Whichever loses joins
+    the survivor's history, and the guest's own history travels with it —
+    the guest's first touch is the account's first touch.
+
+    Idempotent: the guest row is deleted, so a redelivery finds nothing and
+    answers 0.
+    """
+    from django.db import transaction
+
+    from .models import UserAttribution
+
+    source_key = user_key(from_user_id)
+    target_key = user_key(into_user_id)
+    if source_key is None or target_key is None or source_key == target_key:
+        return 0
+
+    with transaction.atomic():
+        guest = UserAttribution.objects.filter(user_id=source_key).first()
+        if guest is None:
+            return 0
+
+        survivor = UserAttribution.objects.filter(user_id=target_key).first()
+        if survivor is None:
+            # Nothing to reconcile: the row itself moves, history and all.
+            guest.user_id = target_key
+            guest.save(update_fields=["user_id", "updated_at"])
+            return 1
+
+        history = [*(survivor.history or []), *(guest.history or [])]
+        if is_newer(guest.clicked_at, survivor):
+            history.append(_history_entry(survivor))
+            for name in RECORD_FIELDS:
+                setattr(survivor, name, getattr(guest, name))
+        else:
+            history.append(_history_entry(guest))
+        history.sort(key=_history_order)
+        survivor.history = _trim_history(history)
+        survivor.save(update_fields=[*RECORD_FIELDS, "history", "updated_at"])
+        guest.delete()
+        return 1
 
 
 def capture(request, *, now=None):
     """Read the cookie off *request* and store it. The middleware's whole job.
 
-    Returns the row when one was written, ``None`` in every other case —
-    capture off, no cookie, no account, an attribution already stored, an
-    explicit URL attribution on this very request, or a cookie that did not
-    decode.
+    Returns the row when one was **written** — created or replaced by a
+    newer click — and ``None`` in every other case: capture off, no cookie,
+    no account, a click that is not newer than the stored one, an explicit
+    URL attribution on this very request, or a cookie that did not decode.
+
+    It runs on every authenticated request, not only the first. That is the
+    whole of requirement "the click that made the person pay": an account
+    attributed in July must move onto the September ad the same person
+    clicked before subscribing. The cost of the ordinary case — a cookie
+    the account is already attributed to — is one indexed SELECT.
     """
     name = cookie_name()
     if not name:
@@ -383,15 +579,20 @@ def capture(request, *, now=None):
     if decoded is None:
         return None
 
-    written = record(user, decoded, now=now)
-    if written is None:
+    stored = record(user, decoded, now=now)
+    if stored is None:
         return None
-    row, created = written
-    return row if created else None
+    row, written = stored
+    return row if written else None
 
 
 def attribution_as_dict(row):
-    """One record as the plain mapping a conversion path reads."""
+    """One record as the plain mapping a conversion path reads.
+
+    ``history`` is part of it: the DSAR export goes through here, and a
+    superseded click is as much this person's advertising record as the
+    current one.
+    """
     if row is None:
         return None
     return {
@@ -402,6 +603,7 @@ def attribution_as_dict(row):
         "captured_at": row.captured_at.isoformat() if row.captured_at else None,
         "source": row.source,
         "expired": row.expired,
+        "history": list(row.history or []),
     }
 
 
@@ -425,9 +627,12 @@ __all__ = [
     "CLICK_ID_MAX_LENGTH",
     "CLICK_ID_TYPES",
     "FORMAT_BASE64URL_JSON",
+    "HISTORY_LIMIT",
     "METRIC_CAPTURED",
     "METRIC_EXPIRED",
     "METRIC_MALFORMED",
+    "METRIC_REPLACED",
+    "RECORD_FIELDS",
     "SOURCE_COOKIE",
     "attribution_as_dict",
     "attribution_for",
@@ -439,6 +644,8 @@ __all__ = [
     "first_touch",
     "is_enabled",
     "is_expired",
+    "is_newer",
+    "merge_accounts",
     "record",
     "url_parameter",
     "user_key",

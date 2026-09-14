@@ -373,12 +373,22 @@ same release as the ingest.
   0.2.0 shipped that gap open rather than take the double count; core grew
   the primitive; 0.3.0 closed it.
 
-  The two writes are **not** in one transaction and cannot be — the funnel is
-  in the platform database, the stream may be routed to another engine
-  entirely. They do not need to be: both halves are idempotent, so a
-  redelivery after a partial success finishes the job and both return 0.
+  **The ad attribution moves too** (`attribution.merge_accounts`, 0.7.0).
+  The guest half is often the one that arrived from an ad — it is the
+  session that landed on the paid page and enrolled without signing up — so
+  leaving its click on a row keyed to an id nothing will look up again means
+  the survivor pays and the campaign that bought them is credited with
+  nothing. The newer click becomes the survivor's, the other joins the
+  survivor's `history`, and the guest's own history travels with it.
+
+  The three writes are **not** in one transaction and cannot be — the funnel
+  is in the platform database, the stream may be routed to another engine
+  entirely. They do not need to be: every half is idempotent, so a
+  redelivery after a partial success finishes the job and all three return 0.
   The stream half runs first, because it is the half that can fail for a
-  reason outside this deployment's control.
+  reason outside this deployment's control; the attribution half runs last
+  and its failure is logged, never raised — a marketing record must not
+  replay a merge that is already done.
 
   A deployment that routed the analytics stream to a backend without `rekey`
   gets `RekeyUnsupported`, which is logged at ERROR and **not** raised (a
@@ -578,7 +588,7 @@ STAPEL_ANALYTICS = {
         "NAME": "acme_attr",          # empty (default) = capture is off
         "FORMAT": "base64url_json",
         "FIELDS": {"id": "id", "type": "src", "ts": "ts"},
-        "FIRST_TOUCH": True,
+        "FIRST_TOUCH": False,         # default; True = the 0.6.0 rule
         "URL_PARAM": "click_id",
     },
 }
@@ -593,21 +603,59 @@ application carries it and no script on any subdomain can read it. That
 
 **What the middleware does, per request.** On any request whose user is
 authenticated — an anonymous *account* included, because a guest enrolment
-is an account and it can pay — with no attribution stored yet and a
-decodable cookie present, it writes one `UserAttribution` row: `click_id`,
+is an account and it can pay — with a decodable cookie present, it compares
+that cookie's click against whatever the account is already attributed to
+and writes one `UserAttribution` row when the cookie is newer: `click_id`,
 `click_id_type`, `clicked_at` (from `ts`), `captured_at` (now),
-`source="cookie"`. It runs **after** the view, so it sees whichever of the
-fleet's two authentication paths resolved the user, and mount it after the
+`source="cookie"`, plus the record it replaced appended to `history`. It
+runs **after** the view, so it sees whichever of the fleet's two
+authentication paths resolved the user, and mount it after the
 authentication middleware — the end of `MIDDLEWARE` is the usual answer.
 `analytics.W013` fires when the cookie is named and the class is not
 mounted.
 
-**First touch wins.** A stored attribution is never overwritten by a
-cookie, and a request that carries the explicit `URL_PARAM` stands the
-cookie down for that request: the identifier the frontend passes came
-through a narrower, more deliberate door. `FIRST_TOUCH: False` inverts it —
-the newest click by `clicked_at` wins — and it is a setting because both
-answers are defensible.
+**Last touch wins** (it was first touch through 0.6.0). The platform is
+being told which click produced a payment, and that is the click that closed
+the sale, not the one that opened the account: a person who landed in July,
+returned through a September ad and subscribed that evening was bought by
+September. So a stored attribution is replaced by a **strictly newer** click
+— by `clicked_at`, never by arrival order — whichever door it came through,
+and the door stops being the tiebreaker: an explicit attribution the
+frontend posted keeps its precedence only while it is also the newer click.
+Equal is not newer, which is what keeps the cookie from costing a write on
+every request it rides. `FIRST_TOUCH: True` restores the old rule.
+
+The `URL_PARAM` still stands the cookie down, but for one request and for a
+narrower reason: the explicit write is in flight (in the view this wraps, or
+in another service entirely), so there is nothing stored yet to compare
+click times against. From the next request on the ordinary rule decides.
+
+**The first touch is kept, not lost.** Each superseded record is appended to
+`history` on the row — `{click_id, click_id_type, clicked_at, captured_at,
+source, expired}`, oldest first, bounded at `attribution.HISTORY_LIMIT`
+(10). The cap drops from the **middle**: the oldest entry survives however
+many clicks follow it, because a cap that evicted the first touch would
+throw away the one thing the column exists for. `attribution_as_dict` — and
+therefore the DSAR export — carries it.
+
+**A merged guest brings its attribution with it.** `user.merged` is the one
+place a second attribution for the same person turns up, and the guest half
+is often the paid one: the session that landed on the ad and enrolled
+without signing up. `attribution.merge_accounts` (wired into
+`actions.handle_user_merged`) moves it onto the survivor under the same
+rule — the newer click becomes the survivor's, the other joins the history,
+and the guest's own history travels with it. An anonymous account that
+*upgrades in place* keeps its user id, so its row is already the right row
+and nothing moves.
+
+**Enqueue the conversion against the current click.**
+`conversions.enqueue_for_user(user, conversion_action=…, conversion_at=…,
+value=…, currency=…)` reads the row and enqueues the click id **and** the
+click time that are stored *now* — which under last touch is the click that
+closed the sale. A payment path that cached an identifier at registration
+and enqueued it weeks later would report the wrong one. It answers `None`
+when the account has no attribution (the ordinary case) or carries an
+identifier this feed has no column for.
 
 **Ninety days is checked at capture.** A cookie lives ninety days, so a
 click read out of one is routinely at the edge of Google's window. Such a
@@ -881,3 +929,17 @@ registers `emits/` and `functions/`): `gdpr.erasure.requested`,
    against. Until then a deployment that uploads conversions should treat
    the table as in scope for its own retention policy and say so in its
    record of processing.
+
+8. **A host that keeps a SECOND attribution store has to apply the same
+   rule, and this library cannot make it.** Last touch (0.7.0) is enforced
+   over the rows in `UserAttribution`. A deployment whose registration path
+   also stores a click identifier elsewhere — `stapel_auth.attribution`,
+   answered over comm as `auth.signup_attribution` — resolves the two at
+   conversion time in its own code, and if that resolution still prefers
+   the explicit door unconditionally then the deployment is first-touch no
+   matter what this module stores. The rule to port is the one in
+   `attribution.is_newer`: compare click times, and treat a record that
+   knows only `captured_at` as beaten by a click made after that capture.
+   The clean answer is for the signup door to write THROUGH
+   `attribution.record(user, decoded, source="signup")` so there is one row
+   and one rule; that is a fleet change, not a change here.

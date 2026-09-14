@@ -4,6 +4,136 @@ All notable changes to stapel-analytics are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Pre-1.0 semver: **minor = breaking**, patch = compatible.
 
+## [0.7.0] — 2026-09-14
+
+### Changed — attribution is LAST touch: the click that made the person pay
+
+Minor (pre-1.0: minor = breaking, and the shipped behaviour of every
+deployment that captures the cookie changes). One migration,
+`0005_userattribution_history`: one added column, nothing altered, nothing
+dropped.
+
+0.6.0 stored the FIRST click and never looked again. The record it produced
+answers "where did we first meet this person", and that is not the question
+Google Ads is asking. The platform is being told which click produced a
+payment so that Smart Bidding can fund the ad that closes sales — and for
+somebody who landed in July, came back through a September ad and
+subscribed that evening, first touch credits July, starves September, and
+teaches the bidding model the opposite of what happened.
+
+**The rule.** A stored attribution is now replaced by a **strictly newer**
+click, and the record it replaced is kept. Newer means `clicked_at` and
+nothing else — never arrival order, which a retry, a second tab and a proxy
+each reorder while none of them reorders the clock. Equal is **not** newer:
+the cookie rides every request, so a repeat of the same click is the
+ordinary case and must not cost a write.
+
+* **`FIRST_TOUCH` now defaults to `False`.** The flag stays, so a host that
+  wants the old behaviour is one setting away from it — but a host that
+  set `"FIRST_TOUCH": True` **explicitly** keeps first touch and will not
+  get this release's behaviour until that line is removed. The default is
+  the only thing that moved.
+* **Which door a record came through stops being the tiebreaker.** An
+  explicit attribution the frontend posted (`source="signup"`, or any
+  host's own word) keeps its precedence over the cookie only while it is
+  also the newer click. `URL_PARAM` still stands the cookie down, but for
+  one request and for a narrower reason: the explicit write is in flight —
+  in the view this middleware wraps, or in another service — so there is
+  nothing stored yet to compare click times against, and a comparison
+  against nothing is how the wide net wins a race it should have had to
+  earn. From the next request on the ordinary rule decides.
+* **A stored record with no click time** — the ordinary shape of the
+  explicit door, which often knows only when the identifier was handed
+  over — is beaten by the one comparison that holds without it: a click
+  made after that record was *captured*. Anything earlier cannot be ordered
+  against it at all and loses. A missing timestamp never decides a winner
+  (`attribution.is_newer`, and it is public because a host resolving two
+  attribution stores needs the same rule).
+
+### Added — the first touch is kept, not lost
+
+`UserAttribution.history`: a JSON list of the records this account was
+attributed to **before** the current one, oldest first, in the shape
+`attribution_as_dict` uses (`click_id`, `click_id_type`, `clicked_at`,
+`captured_at`, `source`, `expired`). Overwriting is what the ad platform
+needs; forgetting is not what reporting needs.
+
+Bounded at `attribution.HISTORY_LIMIT` (10), and the cap **drops from the
+middle**: the oldest entry survives however many clicks follow it, because a
+plain "keep the last ten" would evict the first touch on the eleventh click
+— precisely the entry the column exists to keep. A JSON column rather than a
+second table because it is read by whoever reads the row, never queried
+across accounts, and bounded; three properties that make a table a join
+nobody needed.
+
+`attribution_as_dict` answers one key more (`history`), so the DSAR export
+carries it: a superseded click is as much this person's advertising record
+as the current one. `erasure.erase_account` already deleted the row and
+still does.
+
+### Added — the rule runs on every authenticated request
+
+`AttributionCookieMiddleware` used to be a no-op the moment a row existed.
+It now runs the comparison each time, which is what makes "the click that
+made the person pay" true for somebody who clicks a second ad while already
+signed in. The ordinary case costs one indexed SELECT and no write: the
+cookie an account is already attributed to is not newer than itself
+(`tests/…::test_a_repeat_of_the_same_cookie_writes_nothing` asserts the row
+is not rewritten).
+
+`attribution.record` therefore returns `(row, **written**)` rather than
+`(row, created)` — `True` when the row was created **or** replaced.
+`attribution.capture` returns the row on both, where it previously returned
+one only on the first write. A caller that could only ever see a first write
+could not tell an overwrite from a no-op.
+
+### Added — `conversions.enqueue_for_user`
+
+The door a host's payment path should use: it reads the account's attribution
+and enqueues the click id **and** the click time stored *now*, which under
+last touch is the click that closed the sale. A path that cached an
+identifier at registration and enqueued it weeks later reports the wrong one.
+Answers `None` when there is no attribution (the ordinary case — most
+accounts never came from an ad) or when the identifier is one this feed has
+no column for (a `yclid` is a correct record and a Yandex feed is a different
+file); neither is an error and neither warns.
+
+### Added — a merged guest carries its attribution onto the survivor
+
+`attribution.merge_accounts`, wired into `actions.handle_user_merged`, so
+`user.merged` now moves three things rather than two. The guest half is
+frequently the paid one: it is the session that landed on the ad and
+enrolled without signing up, and leaving its click on a row keyed to an id
+nothing will ever look up again means the survivor pays and the campaign
+that bought them is credited with nothing.
+
+Survivor with no attribution: the guest's row moves whole, history included.
+Survivor with one: the newer click wins by the same rule, the loser joins the
+history, and the guest's own history travels with it — the guest's first
+touch is the account's first touch. Idempotent (the guest row is deleted, so
+a redelivery answers 0), and its failure is logged rather than raised: a
+marketing record must not replay a merge whose other two halves are done.
+
+An anonymous account that **upgrades in place** keeps its user id, so its row
+is already the right row and nothing moves —
+`tests/…::test_an_upgraded_anonymous_account_keeps_its_row` pins that,
+because "nothing happens" is exactly the kind of guarantee that quietly stops
+being true.
+
+### Upgrading
+
+* A host that set `"FIRST_TOUCH": True` explicitly **must remove that line**
+  to get last touch. The default flip does not reach it.
+* A host that resolves between **two** attribution stores (an auth-side
+  signup attribution and this cookie row) resolves them in its own code, and
+  a resolution that still prefers the explicit door unconditionally is
+  first-touch whatever this module stores. Port `attribution.is_newer`
+  — MODULE.md follow-up 8.
+* Apply `0005_userattribution_history` before the code that reads
+  `history`; the column defaults to `[]` so an existing row is a valid row
+  with no first touch recorded, which is the honest answer for a click
+  captured before this release.
+
 ## [0.6.0] — 2026-09-12
 
 ### Added — the ad click that produced an account, read off a cookie the server owns

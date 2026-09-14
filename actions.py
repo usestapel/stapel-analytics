@@ -216,8 +216,8 @@ def reset_comm_bridge() -> None:
 def handle_user_merged(event):
     """An anonymous guest was absorbed into an existing account.
 
-    Two things carry over, and they are separate mechanisms because they live
-    in separate stores:
+    Three things carry over, and they are separate mechanisms because they
+    live in separate stores:
 
     * :class:`~stapel_analytics.models.Funnel` — ``owner_id``. Plain rewrite;
       the funnel's uniqueness is on ``slug``, deployment-wide, so nothing is
@@ -235,12 +235,23 @@ def handle_user_merged(event):
       sequence that counts it twice when interrupted. That sequence is why
       0.2.0 shipped this gap open on purpose; the primitive is what closed it.
 
-    The two writes are **not** in one transaction, and cannot be: the funnel
-    row is in the platform database and the stream may be routed to another
-    engine entirely (``STAPEL_EVENTSTORE["ROUTES"]``). They do not need to be.
-    Both halves are idempotent, so a redelivery after a partial success
-    finishes the job — the funnel update finds nothing left to move, the
-    re-key finds no row under the guest's hash, and both return 0.
+    * **The ad attribution** — :func:`attribution.merge_accounts`. The guest
+      half is very often the half that arrived from an ad: it is the session
+      that landed on the paid page and enrolled without signing up. Leaving
+      its click on a row keyed to an id nothing will ever look up again
+      means the survivor pays and the campaign that bought them is credited
+      with nothing — the exact failure the capture exists to prevent. The
+      newer click becomes the survivor's (the module's rule everywhere), the
+      other joins the survivor's history, and the guest's own history
+      travels with it.
+
+    The three writes are **not** in one transaction, and cannot be: the
+    funnel row is in the platform database and the stream may be routed to
+    another engine entirely (``STAPEL_EVENTSTORE["ROUTES"]``). They do not
+    need to be. Every half is idempotent, so a redelivery after a partial
+    success finishes the job — the funnel update finds nothing left to move,
+    the re-key finds no row under the guest's hash, the attribution merge
+    finds no guest row, and all three return 0.
 
     Order is deliberate: the stream first. It is the half that can fail for a
     reason outside this deployment's control (a routed backend that predates
@@ -261,7 +272,7 @@ def handle_user_merged(event):
     from django.core.exceptions import ValidationError
     from django.db import transaction
 
-    from . import store
+    from . import attribution, store
     from .models import Funnel
     from .privacy import hash_user_id
 
@@ -308,14 +319,32 @@ def handle_user_merged(event):
         # An id that cannot address a row here names nothing to carry over.
         logger.warning("user.merged with unusable user ids: %s", event.event_id)
         return
-    if moved or rekeyed:
+
+    attributed = 0
+    try:
+        attributed = attribution.merge_accounts(from_user_id, into_user_id)
+    except Exception:
+        # A marketing record never costs a merge. The stream and the funnels
+        # are already the survivor's; refusing the whole event over an
+        # advertising row would replay it forever against a job that has
+        # nothing left to do.
+        logger.exception(
+            "user.merged %s -> %s: could not carry the ad attribution onto "
+            "the survivor (event %s) — the merge itself stands",
+            from_user_id,
+            into_user_id,
+            event.event_id,
+        )
+
+    if moved or rekeyed or attributed:
         logger.info(
             "user.merged %s -> %s: %s funnel(s) re-owned, %s event row(s) "
-            "re-keyed onto the survivor",
+            "re-keyed, %s attribution(s) carried onto the survivor",
             from_user_id,
             into_user_id,
             moved,
             rekeyed,
+            attributed,
         )
 
 
