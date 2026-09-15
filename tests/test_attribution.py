@@ -24,7 +24,7 @@ from stapel_analytics.models import ConversionUpload, UserAttribution
 #: The envelope the host's marketing site writes: base64url of
 #: {"id", "src", "ts"}, unpadded.
 HOST_FIELDS = {"id": "id", "type": "src", "ts": "ts"}
-COOKIE = "ironmemo_attr"
+COOKIE = "host_attr"  # a host names its own cookie; the value here is arbitrary
 
 
 def envelope(payload: dict, *, pad: bool = False) -> str:
