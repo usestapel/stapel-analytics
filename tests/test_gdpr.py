@@ -4,11 +4,16 @@ Both protocols are exercised — the 0.5.0 bus request and the in-process
 provider — because a deployment uses one or the other and neither may be
 the one that works.
 """
+import json
 import uuid
+from pathlib import Path
 
+import jsonschema
 import pytest
+import stapel_core
 from django.db import transaction
 from stapel_core.comm import emit, on_action
+from stapel_core.comm.schema_ownership import CORE_OWNED_ACTIONS
 
 from stapel_analytics import services
 from stapel_analytics.erasure import (
@@ -26,6 +31,25 @@ from stapel_analytics.store import iter_events
 
 USER_ID = "u-1"
 OTHER_ID = "u-2"
+
+SCHEMAS = Path(__file__).resolve().parent.parent / "schemas"
+#: Core owns the erasure receipt and the probe answer and ships their schemas.
+#: Resolution goes to the owner's file, so a copy landing here cannot quietly
+#: become this service's contract.
+CORE_SCHEMAS = Path(stapel_core.__file__).resolve().parent / "gdpr" / "schemas"
+
+
+def _schema_path(name: str) -> Path:
+    local = SCHEMAS / "emits" / f"{name}.json"
+    return local if local.exists() else CORE_SCHEMAS / "emits" / f"{name}.json"
+
+
+def _validate(payload: dict, name: str) -> None:
+    jsonschema.validate(
+        payload,
+        json.loads(_schema_path(name).read_text()),
+        format_checker=jsonschema.FormatChecker(),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -287,3 +311,59 @@ class TestBusProtocol:
                 },
             )
         assert "anon-2" not in {r.get("anon_id") for r in iter_events()}
+
+
+class TestCoreOwnsTheReceiptContract:
+    """`gdpr.section.erased` and `gdpr.owner.alive` are core's facts.
+
+    `stapel_core.comm` registers ONE schema per action name for the whole
+    process, so whichever copy a service loads becomes the contract for every
+    emitter in it. This module shipped copies of both until 0.7.1. Sibling
+    modules had already drifted theirs into pinning `owner` to their own name,
+    which refuses every other owner's receipt — and the receipt is emitted
+    inside the erasure's own transaction, so the refusal rolls the erasure back
+    while the orchestrator counts a success.
+
+    Core ships the schemas since 0.81.0. These hold the resolution at the
+    owner's file.
+    """
+
+    def test_this_module_ships_no_copy_of_cores_facts(self):
+        for action in CORE_OWNED_ACTIONS:
+            for kind in ("emits", "consumes", "functions"):
+                assert not (SCHEMAS / kind / f"{action}.json").exists(), (
+                    f"{action} is emitted by stapel_core, which ships its "
+                    f"schema. A copy here becomes the contract for every "
+                    f"emitter in any service that loads it."
+                )
+
+    def test_the_receipt_schema_resolves_to_cores_file(self):
+        for action in CORE_OWNED_ACTIONS:
+            assert _schema_path(action) == CORE_SCHEMAS / "emits" / f"{action}.json"
+
+    def test_another_owners_receipt_validates(self):
+        """The shape a copy pinned to this module's owner name refused."""
+        _validate(
+            {
+                "correlation_id": "c1",
+                "owner": "identity_mirror:a-service",
+                "subject_type": "account",
+                "subject_key": "u1",
+                "receipt_id": "identity_mirror:account:u1:c1",
+                "counts": {"identity_mirror": 1},
+            },
+            "gdpr.section.erased",
+        )
+
+    def test_this_modules_own_receipt_validates(self):
+        _validate(
+            {
+                "correlation_id": "c1",
+                "owner": OWNER,
+                "subject_type": "account",
+                "subject_key": USER_ID,
+                "receipt_id": f"{OWNER}:account:{USER_ID}:c1",
+                "counts": {"events": 2},
+            },
+            "gdpr.section.erased",
+        )
