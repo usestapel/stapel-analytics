@@ -71,6 +71,8 @@ from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
 
+from .feed import FEED_SUPPORTS_ACTION_NAMES  # noqa: F401  re-exported for hosts
+
 logger = logging.getLogger(__name__)
 
 #: The request field each click-id kind travels in. Google models them as
@@ -409,6 +411,20 @@ def send(row) -> tuple[str, str]:
 # ── The outbox ───────────────────────────────────────────────────────
 
 
+#: The consent values a row may carry, Google's enum spelling. Blank = unset.
+CONSENT_VALUES = ("", "GRANTED", "DENIED")
+
+#: Longest order id the outbox stores (``ConversionUpload.order_id``).
+ORDER_ID_MAX_LENGTH = 64
+
+
+def _consent(value, field: str) -> str:
+    normalized = str(value or "").strip().upper()
+    if normalized not in CONSENT_VALUES:
+        raise ValueError(f"{field} must be one of {CONSENT_VALUES!r}, not {value!r}")
+    return normalized
+
+
 def enqueue(
     *,
     click_id,
@@ -418,6 +434,9 @@ def enqueue(
     clicked_at=None,
     value=None,
     currency="",
+    order_id="",
+    ad_user_data="",
+    ad_personalization="",
 ):
     """Write the conversion down. Idempotent on its natural key.
 
@@ -425,22 +444,72 @@ def enqueue(
     ``(click_id, conversion_action, conversion_at)`` returns the FIRST row
     untouched — including its status — because that row may already have
     been uploaded, and overwriting it would re-open a settled fact.
+
+    ``order_id`` is unique per conversion action when non-blank. A call
+    whose ``(conversion_action, order_id)`` is already taken creates
+    nothing and returns ``(existing_row, False)`` — the same answer as a
+    natural-key repeat — even when its click or time differ: one order is
+    one conversion, whichever click a later pass resolved. A differing
+    natural key is logged as a WARNING. ``ad_user_data`` and
+    ``ad_personalization`` take ``""`` / ``"GRANTED"`` / ``"DENIED"``
+    (case-insensitive); anything else raises ``ValueError``, as does an
+    order id longer than :data:`ORDER_ID_MAX_LENGTH`.
     """
+    from django.db import IntegrityError
+
     from .models import ConversionUpload
 
     if click_id_type not in CLICK_ID_FIELDS:
         raise ValueError(f"unknown click id type {click_id_type!r}")
-    return ConversionUpload.objects.get_or_create(
-        click_id=str(click_id),
-        conversion_action=str(conversion_action or ""),
-        conversion_at=conversion_at,
-        defaults={
-            "click_id_type": click_id_type,
-            "clicked_at": clicked_at,
-            "value": value,
-            "currency": str(currency or "")[:3].upper(),
-        },
-    )
+    action = str(conversion_action or "")
+    order = str(order_id or "").strip()
+    if len(order) > ORDER_ID_MAX_LENGTH:
+        raise ValueError(f"order id longer than {ORDER_ID_MAX_LENGTH} characters")
+    user_data = _consent(ad_user_data, "ad_user_data")
+    personalization = _consent(ad_personalization, "ad_personalization")
+
+    def taken():
+        if not order:
+            return None
+        existing = ConversionUpload.objects.filter(
+            conversion_action=action, order_id=order
+        ).first()
+        if existing is not None and (
+            existing.click_id != str(click_id)
+            or existing.conversion_at != conversion_at
+        ):
+            logger.warning(
+                "analytics: order id already enqueued for %s with another "
+                "click or time — kept row %s, created nothing",
+                action or "(no action)",
+                existing.pk,
+            )
+        return existing
+
+    existing = taken()
+    if existing is not None:
+        return existing, False
+    try:
+        return ConversionUpload.objects.get_or_create(
+            click_id=str(click_id),
+            conversion_action=action,
+            conversion_at=conversion_at,
+            defaults={
+                "click_id_type": click_id_type,
+                "clicked_at": clicked_at,
+                "value": value,
+                "currency": str(currency or "")[:3].upper(),
+                "order_id": order,
+                "ad_user_data": user_data,
+                "ad_personalization": personalization,
+            },
+        )
+    except IntegrityError:
+        # A concurrent writer took the order id between the read and the insert.
+        existing = taken()
+        if existing is None:
+            raise
+        return existing, False
 
 
 def enqueue_for_user(
@@ -450,6 +519,9 @@ def enqueue_for_user(
     conversion_at,
     value=None,
     currency="",
+    order_id="",
+    ad_user_data="",
+    ad_personalization="",
 ):
     """Enqueue a conversion against the account's CURRENT click.
 
@@ -495,6 +567,9 @@ def enqueue_for_user(
         clicked_at=row.clicked_at,
         value=value,
         currency=currency,
+        order_id=order_id,
+        ad_user_data=ad_user_data,
+        ad_personalization=ad_personalization,
     )
 
 
@@ -631,6 +706,9 @@ def due(limit: int = 100):
 
 __all__ = [
     "CLICK_ID_FIELDS",
+    "CONSENT_VALUES",
+    "FEED_SUPPORTS_ACTION_NAMES",
+    "ORDER_ID_MAX_LENGTH",
     "GoogleAdsUnavailable",
     "REQUIRED_CREDENTIALS",
     "build_click_conversion",

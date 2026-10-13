@@ -723,6 +723,9 @@ class TestTheConversionPath:
             **getattr(settings, "STAPEL_ANALYTICS", {}),
             "CONVERSION_FEED_TOKEN": "feed-token",
             "CONVERSION_FEED_CONVERSION_NAME": "Paid account",
+            "CONVERSION_FEED_CONVERSION_NAMES": {
+                "customers/1/conversionActions/2": "Paid account",
+            },
         }
         now = timezone.now()
         for click_id, kind in (("g-click", "gclid"), ("y-click", "yclid")):

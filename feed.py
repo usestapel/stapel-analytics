@@ -95,6 +95,11 @@ COLUMN_NAME = "Conversion Name"
 COLUMN_TIME = "Conversion Time"
 COLUMN_VALUE = "Conversion Value"
 COLUMN_CURRENCY = "Conversion Currency"
+#: The template's transaction id and consent columns
+#: (support.google.com/google-ads/answer/7014069).
+COLUMN_ORDER_ID = "Order ID"
+COLUMN_AD_USER_DATA = "Ad User Data"
+COLUMN_AD_PERSONALIZATION = "Ad Personalization"
 
 COLUMNS = (
     COLUMN_GCLID,
@@ -104,7 +109,19 @@ COLUMNS = (
     COLUMN_TIME,
     COLUMN_VALUE,
     COLUMN_CURRENCY,
+    COLUMN_ORDER_ID,
+    COLUMN_AD_USER_DATA,
+    COLUMN_AD_PERSONALIZATION,
 )
+
+#: Stored consent value -> the file's spelling. Unset stays an empty cell.
+CONSENT_CELLS = {"GRANTED": "Granted", "DENIED": "Denied"}
+
+#: This feed names each row by its conversion action
+#: (``CONVERSION_FEED_CONVERSION_NAMES``) and refuses to serve a row whose
+#: action it cannot name. A host that enqueues more than one action checks
+#: for it before enqueuing: an older feed puts every row under one name.
+FEED_SUPPORTS_ACTION_NAMES = True
 
 #: Which column a click id lands in, by its kind. The same mapping
 #: ``conversions.CLICK_ID_FIELDS`` makes for the API, in the file's
@@ -290,24 +307,68 @@ def window_days() -> int:
 
 
 def conversion_name() -> str:
-    """The ``Conversion Name`` every row carries.
+    """The ``Conversion Name`` of rows enqueued WITHOUT a conversion action.
 
-    One name for the whole feed, not one per row: the file matches the
-    conversion action by its DISPLAY name in the ads account, and that name
-    is a property of the account this deployment reports to — the same
-    thing ``GOOGLE_ADS_CONVERSION_ACTION_PAID``-style resource names say in
-    the API's vocabulary.
+    The file matches the conversion action by its DISPLAY name in the ads
+    account. A row that carries a resource name is named only through
+    :func:`conversion_names`; this single name never reaches it.
     """
     from .conf import analytics_settings
 
     return str(analytics_settings.CONVERSION_FEED_CONVERSION_NAME or "").strip()
 
 
+def conversion_names() -> dict:
+    """``CONVERSION_FEED_CONVERSION_NAMES``: resource name -> display name.
+
+    Keys and values are stripped; an entry with an empty side is dropped,
+    so its action is unmapped and its rows are not served.
+    """
+    from .conf import analytics_settings
+
+    raw = analytics_settings.CONVERSION_FEED_CONVERSION_NAMES or {}
+    names = {}
+    for action, name in dict(raw).items():
+        action, name = str(action or "").strip(), str(name or "").strip()
+        if action and name:
+            names[action] = name
+    return names
+
+
+def duplicate_display_names(names: dict) -> list[str]:
+    """Display names that more than one action maps to (case-insensitive).
+
+    Two actions under one name make their rows indistinguishable to the
+    importer — one action's conversions counted as the other's.
+    """
+    seen: dict[str, int] = {}
+    for name in names.values():
+        key = name.casefold()
+        seen[key] = seen.get(key, 0) + 1
+    return sorted({name for name in names.values() if seen[name.casefold()] > 1})
+
+
+def name_for(row, names: dict | None = None) -> str | None:
+    """The ``Conversion Name`` *row* is served under, or ``None`` = not served.
+
+    A row with an action is named only by the map; a row without one by
+    ``CONVERSION_FEED_CONVERSION_NAME``.
+    """
+    action = str(row.conversion_action or "").strip()
+    if not action:
+        return conversion_name()
+    if names is None:
+        names = conversion_names()
+    return names.get(action)
+
+
 # ── The rows ─────────────────────────────────────────────────────────
 
 
-def feed_rows(*, now=None):
-    """The outbox rows this feed serves, oldest conversion first.
+def eligible_rows(*, now=None):
+    """The outbox rows this feed may serve, oldest conversion first.
+
+    Before the naming rule: :func:`feed_rows` applies that.
 
     Two bounds, and they are different in kind. The feed window is ours: it
     says how much history one response carries. The click window is the
@@ -341,25 +402,94 @@ def feed_rows(*, now=None):
     return [row for row in queryset if stale_verdict(row, now=moment) is None]
 
 
-def row_values(row) -> dict:
+class Selection(NamedTuple):
+    """What one fetch serves, and what it held back and why."""
+
+    rows: list
+    unmapped: int
+    unmapped_actions: tuple
+    duplicate_names: tuple
+
+
+def select_rows(*, now=None) -> Selection:
+    """Apply the serve rule to the eligible rows. Logs nothing."""
+    names = conversion_names()
+    rows = eligible_rows(now=now)
+    duplicates = tuple(duplicate_display_names(names))
+    if duplicates:
+        return Selection([], 0, (), duplicates)
+    served, unmapped = [], set()
+    count = 0
+    for row in rows:
+        if name_for(row, names) is None:
+            count += 1
+            unmapped.add(row.conversion_action)
+        else:
+            served.append(row)
+    return Selection(served, count, tuple(sorted(unmapped)), ())
+
+
+def feed_rows(*, now=None):
+    """The rows this fetch serves — the serve rule, decided on every call.
+
+    Fail closed, because a row under the wrong name is a conversion counted
+    as another action's and bidding cannot unlearn it:
+
+    - a row with a ``conversion_action`` is served only under its entry in
+      ``CONVERSION_FEED_CONVERSION_NAMES``; a row whose action is not there
+      is held back (it is not consumed — the next fetch re-reads it) and an
+      ERROR names the count;
+    - two map entries with one display name serve NOTHING, with an ERROR;
+    - ``CONVERSION_FEED_CONVERSION_NAME`` names only rows with no action.
+
+    ``analytics.E003`` / ``analytics.W014`` say the same at boot; this
+    function never relies on them.
+    """
+    selection = select_rows(now=now)
+    if selection.duplicate_names:
+        logger.error(
+            "conversion feed: CONVERSION_FEED_CONVERSION_NAMES maps several "
+            "actions to one display name %r — serving nothing",
+            list(selection.duplicate_names),
+        )
+    elif selection.unmapped:
+        logger.error(
+            "conversion feed: %d row(s) not served — their conversion action "
+            "is not in CONVERSION_FEED_CONVERSION_NAMES: %s",
+            selection.unmapped,
+            ", ".join(selection.unmapped_actions),
+        )
+    return selection.rows
+
+
+def row_values(row, names: dict | None = None) -> dict:
     """One outbox row as the file's columns.
 
     The click id goes in the column its KIND names and the other two stay
     empty — a gbraid written into the gclid column is not a mistyped value,
-    it is a row the platform drops.
+    it is a row the platform drops. A row the serve rule cannot name raises
+    ``ValueError`` rather than being written under some other name.
     """
     values = dict.fromkeys(COLUMNS, "")
     column = CLICK_ID_COLUMNS.get(row.click_id_type)
     if column is None:
         raise ValueError(f"unknown click id type {row.click_id_type!r}")
+    name = name_for(row, names)
+    if name is None:
+        raise ValueError(
+            f"conversion action {row.conversion_action!r} has no display name"
+        )
     from .conversions import google_datetime
 
     values[column] = row.click_id
-    values[COLUMN_NAME] = conversion_name()
+    values[COLUMN_NAME] = name
     values[COLUMN_TIME] = google_datetime(row.conversion_at)
     if row.value is not None:
         values[COLUMN_VALUE] = f"{row.value:f}".rstrip("0").rstrip(".") or "0"
         values[COLUMN_CURRENCY] = row.currency
+    values[COLUMN_ORDER_ID] = row.order_id or ""
+    values[COLUMN_AD_USER_DATA] = CONSENT_CELLS.get(row.ad_user_data, "")
+    values[COLUMN_AD_PERSONALIZATION] = CONSENT_CELLS.get(row.ad_personalization, "")
     return values
 
 
@@ -376,8 +506,9 @@ def render_csv(rows) -> str:
         buffer, fieldnames=list(COLUMNS), lineterminator="\r\n"
     )
     writer.writeheader()
+    names = conversion_names()
     for row in rows:
-        writer.writerow(row_values(row))
+        writer.writerow(row_values(row, names))
     return buffer.getvalue()
 
 
@@ -413,11 +544,16 @@ def feed_status() -> dict:
     from .models import ConversionFeedFetch, ConversionUpload
 
     last = ConversionFeedFetch.objects.order_by("-at").first()
+    selection = select_rows()
     return {
         "enabled": is_enabled(),
         "conversion_name": conversion_name(),
+        "conversion_names": conversion_names(),
+        "duplicate_names": list(selection.duplicate_names),
         "window_days": window_days(),
-        "rows_available": len(feed_rows()),
+        "rows_available": len(selection.rows),
+        "rows_unmapped": selection.unmapped,
+        "unmapped_actions": list(selection.unmapped_actions),
         "pending": ConversionUpload.objects.filter(
             status=ConversionUpload.STATUS_PENDING
         ).count(),
@@ -431,6 +567,14 @@ def feed_status() -> dict:
 __all__ = [
     "CLICK_ID_COLUMNS",
     "COLUMNS",
+    "CONSENT_CELLS",
+    "FEED_SUPPORTS_ACTION_NAMES",
+    "Selection",
+    "conversion_names",
+    "duplicate_display_names",
+    "eligible_rows",
+    "name_for",
+    "select_rows",
     "FED_STATUSES",
     "FETCH_HISTORY_DAYS",
     "PLACEHOLDER_CONVERSION_NAME",

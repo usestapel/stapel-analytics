@@ -485,6 +485,24 @@ module drops it nothing reconstructs it. So the conversion is written to
 conversion reported twice (a retried webhook, a replayed Action, an
 operator re-running an importer) is one row and at most one upload.
 
+**An order id is one conversion per action.** `conversions.enqueue(...,
+order_id="", ad_user_data="", ad_personalization="")` stores the caller's
+transaction id (at most 64 characters) and the two consent signals
+(`""` / `"GRANTED"` / `"DENIED"`). A non-blank `order_id` is unique per
+`conversion_action` (partial constraint `anl_conv_order_uniq`): a second
+enqueue with a taken order id creates nothing and returns
+`(existing_row, False)`, logging a WARNING when its click or time differ.
+The order id never carries customer information — derive it (a hash), do
+not paste an account id. These fields reach the feed (below); the push
+door does not send them.
+
+**The push door is the Google Ads API.** `deliver` (and the
+`upload_click_conversions` task) call `ConversionUploadService`. Google is
+migrating offline imports through that API to the Data Manager API
+(support.google.com/google-ads/answer/14274408); a deployment starting now
+should report through the conversion feed below. The scheduled file import
+is a Data manager source and is not affected.
+
 **Four statuses, and the fourth is the honest one.** `uploaded` and
 `rejected` (Google's own message, verbatim) are terminal. `skipped` means
 this module refused to send it. `pending` means the upload could not be
@@ -707,8 +725,9 @@ unless `CONVERSION_FEED_USERNAME` pins it. A fetcher that can send a
 password must not be given the token in the URL.
 
 ```
-Google Click ID,GBRAID,WBRAID,Conversion Name,Conversion Time,Conversion Value,Conversion Currency
-Cj0KCQjw…,,,Paid registration (offline import),2026-09-04 11:02:00+03:00,49,EUR
+Google Click ID,GBRAID,WBRAID,Conversion Name,Conversion Time,Conversion Value,Conversion Currency,Order ID,Ad User Data,Ad Personalization
+Cj0KCQjw…,,,Purchase (offline import),2026-09-04 11:02:00+03:00,49,EUR,,,
+Cj0KCQjx…,,,Signup (offline import),2026-09-05 08:40:00+03:00,,,9f86d081884c7d659a2feaa0c55ad015,Granted,Granted
 ```
 
 The three identifier columns are adjacent and first because the rule they
@@ -787,9 +806,53 @@ conversion action by its DISPLAY name in the ad account, character for
 character — not by the resource name the API path uses, which stays
 `conversion_action` on the row. A mismatch is not an error anywhere: the
 fetch succeeds, the file parses, every row is dropped, and the conversion
-count simply stays at zero. `analytics.W012` fires when the feed is on and
+count simply stays at zero. `analytics.W012` fires when the feed is on, no
+`CONVERSION_FEED_CONVERSION_NAMES` map is set, and
 `CONVERSION_FEED_CONVERSION_NAME` is empty or still the shipped
 placeholder.
+
+**One name per conversion action, and the feed fails closed.** A host that
+reports more than one action (say a purchase and a signup) names each by
+its resource name:
+
+```python
+STAPEL_ANALYTICS = {
+    "CONVERSION_FEED_CONVERSION_NAMES": {
+        "customers/1234567890/conversionActions/42": "Purchase (offline import)",
+        "customers/1234567890/conversionActions/43": "Signup (offline import)",
+    },
+}
+```
+
+The serve rule is decided in `feed.feed_rows` on **every** fetch:
+
+- a row with a non-empty `conversion_action` is served only under its entry
+  in the map; a row whose action is not there is **not served** — it waits
+  in the outbox (the next fetch re-reads it), and every fetch logs an ERROR
+  with the count and the unmapped actions;
+- `CONVERSION_FEED_CONVERSION_NAME` names only rows with an **empty**
+  action — it never reaches a row that carries one;
+- two map entries with one display name (compared case-insensitively) serve
+  **nothing**, with an ERROR — the importer could not tell the actions apart.
+
+A row under another action's name is a conversion bidding learns from and
+cannot unlearn; a held-back row costs a delay. `analytics.E003` (equal
+display names) and `analytics.W014` (outbox rows with an unmapped action,
+a database check) repeat the rule at boot; the fetch never relies on them.
+`analytics_conversion_feed_status` prints the map and what is held back.
+
+`feed.FEED_SUPPORTS_ACTION_NAMES = True` (re-exported as
+`stapel_analytics.conversions.FEED_SUPPORTS_ACTION_NAMES`) marks a feed with
+this rule. A host that enqueues several actions checks it before enqueuing:
+an older feed serves every row under the one name.
+
+**Order ID and consent.** `Order ID`, `Ad User Data` and `Ad Personalization`
+follow the click-conversion template
+(support.google.com/google-ads/answer/7014069). The consent cells read
+`Granted` / `Denied`, empty when the row carries no signal (the account's
+import default applies); `Order ID` is the row's `order_id`, empty when
+unset. `Conversion Value` is an empty cell — never `0` — when the row has no
+value.
 
 ---
 
@@ -845,7 +908,8 @@ placeholder.
 | `CONVERSION_FEED_TOKEN` | `""` | **secret**, the feed's token — Basic password, bearer or `?token=`; empty = the endpoint 404s |
 | `CONVERSION_FEED_USERNAME` | `""` | the Basic-auth username the feed insists on; empty = any username |
 | `CONVERSION_FEED_WINDOW_DAYS` | `120` | how much history one feed response carries |
-| `CONVERSION_FEED_CONVERSION_NAME` | `"Offline conversion"` | the `Conversion Name` column — must match the ad account's display name |
+| `CONVERSION_FEED_CONVERSION_NAME` | `"Offline conversion"` | the `Conversion Name` of rows with NO conversion action — must match the ad account's display name |
+| `CONVERSION_FEED_CONVERSION_NAMES` | `{}` | `{conversion action resource name: display name}`; a row with an action is served only under its entry, an unmapped action is not served, equal display names serve nothing |
 | `SUBJECT_RESOLVER` | `…ingest.default_subject` | dotted path: what "the same person" means |
 | `PII_GUARD` | `…privacy.looks_like_pii` | dotted path: the PII heuristic |
 
@@ -858,6 +922,7 @@ CODE, so they are never readable from an environment variable.
 |---|---|---|
 | `analytics.E001` | Error | the default event store is used and `stapel_core.django.eventstore` is not installed |
 | `analytics.E002` | Error | `EVENTS_FILE` cannot be read or parsed |
+| `analytics.E003` | Error | the feed is on and `CONVERSION_FEED_CONVERSION_NAMES` maps two actions to one display name (the feed serves nothing) |
 | `analytics.W001` | Warning | nothing beyond the built-ins is declared |
 | `analytics.W002` | Warning | `PII_MODE = "off"` |
 | `analytics.W003` | Warning | `REGISTRY_MODE = "off"` |
@@ -869,7 +934,8 @@ CODE, so they are never readable from an environment variable.
 | `analytics.W009` | Warning | `analytics` is not in `STAPEL_GDPR["DATA_OWNERS"]` |
 | `analytics.W010` | Warning | `REQUIRE_WRITE_KEY` on with no `WRITE_KEYS` |
 | `analytics.W011` | Warning | click conversions are queued and the Google Ads credentials are incomplete |
-| `analytics.W012` | Warning | the conversion feed is on and its conversion name is empty or still the placeholder |
+| `analytics.W012` | Warning | the conversion feed is on, no name map is set, and its conversion name is empty or still the placeholder |
+| `analytics.W014` | Warning | database check: the feed is on and outbox rows carry a conversion action missing from `CONVERSION_FEED_CONVERSION_NAMES` (held back) |
 | `analytics.W013` | Warning | `ATTRIBUTION_COOKIE['NAME']` is set and `AttributionCookieMiddleware` is not in `MIDDLEWARE` |
 
 ---

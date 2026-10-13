@@ -188,6 +188,29 @@ class ConversionUpload(models.Model):
     value = models.DecimalField(max_digits=18, decimal_places=4, null=True, blank=True)
     currency = models.CharField(max_length=3, blank=True, default="")
 
+    #: Ad-platform consent signals, Google's enum spelling. Blank = unset:
+    #: the row says nothing and the account's import default applies.
+    CONSENT_GRANTED = "GRANTED"
+    CONSENT_DENIED = "DENIED"
+    CONSENT_CHOICES = (
+        ("", "unset"),
+        (CONSENT_GRANTED, "granted"),
+        (CONSENT_DENIED, "denied"),
+    )
+
+    #: The caller's transaction id for this conversion. Unique per
+    #: conversion action when set (``anl_conv_order_uniq``), so one business
+    #: fact cannot become two rows through two different clicks. It is
+    #: what Google deduplicates a file row against a tag hit by, and the
+    #: only key a gbraid conversion can be adjusted by later.
+    order_id = models.CharField(max_length=64, blank=True, default="")
+    ad_user_data = models.CharField(
+        max_length=8, choices=CONSENT_CHOICES, blank=True, default=""
+    )
+    ad_personalization = models.CharField(
+        max_length=8, choices=CONSENT_CHOICES, blank=True, default=""
+    )
+
     status = models.CharField(
         max_length=16, choices=STATUSES, default=STATUS_PENDING, db_index=True
     )
@@ -210,6 +233,11 @@ class ConversionUpload(models.Model):
             models.UniqueConstraint(
                 fields=["click_id", "conversion_action", "conversion_at"],
                 name="anl_conv_upload_uniq",
+            ),
+            models.UniqueConstraint(
+                fields=["conversion_action", "order_id"],
+                condition=~models.Q(order_id=""),
+                name="anl_conv_order_uniq",
             ),
         ]
         indexes = [

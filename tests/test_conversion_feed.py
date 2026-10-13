@@ -32,6 +32,7 @@ def enabled(settings):
     settings.STAPEL_ANALYTICS = {
         "CONVERSION_FEED_TOKEN": TOKEN,
         "CONVERSION_FEED_CONVERSION_NAME": NAME,
+        "CONVERSION_FEED_CONVERSION_NAMES": {ACTION: NAME},
     }
     return settings
 
@@ -70,7 +71,8 @@ class TestLayout:
         body = fetch(api_client).content.decode()
         assert body.splitlines()[0] == (
             "Google Click ID,GBRAID,WBRAID,Conversion Name,"
-            "Conversion Time,Conversion Value,Conversion Currency"
+            "Conversion Time,Conversion Value,Conversion Currency,"
+            "Order ID,Ad User Data,Ad Personalization"
         )
 
     def test_an_empty_outbox_still_answers_the_headers(self, api_client):
@@ -228,6 +230,7 @@ class TestFeedWindow:
         settings.STAPEL_ANALYTICS = {
             "CONVERSION_FEED_TOKEN": TOKEN,
             "CONVERSION_FEED_CONVERSION_NAME": NAME,
+            "CONVERSION_FEED_CONVERSION_NAMES": {ACTION: NAME},
             "CONVERSION_FEED_WINDOW_DAYS": 5,
         }
         now = timezone.now()
@@ -352,6 +355,7 @@ class TestBasicAuth:
         settings.STAPEL_ANALYTICS = {
             "CONVERSION_FEED_TOKEN": TOKEN,
             "CONVERSION_FEED_CONVERSION_NAME": NAME,
+            "CONVERSION_FEED_CONVERSION_NAMES": {ACTION: NAME},
             "CONVERSION_FEED_USERNAME": "google",
         }
         assert api_client.get(FEED, HTTP_AUTHORIZATION=basic("google", TOKEN)).status_code == 200
@@ -362,6 +366,7 @@ class TestBasicAuth:
         settings.STAPEL_ANALYTICS = {
             "CONVERSION_FEED_TOKEN": TOKEN,
             "CONVERSION_FEED_CONVERSION_NAME": NAME,
+            "CONVERSION_FEED_CONVERSION_NAMES": {ACTION: NAME},
             "CONVERSION_FEED_USERNAME": "google",
         }
         assert fetch(api_client).status_code == 200
@@ -621,3 +626,173 @@ class TestFeedMount:
             entry not in GATE_REGISTRY["analytics.api"].patterns
             for entry in gate.patterns
         )
+
+
+# ── One name per conversion action, fail closed ──────────────────────
+
+PAID = "customers/1234567890/conversionActions/42"
+SIGNUP = "customers/1234567890/conversionActions/43"
+PAID_NAME = "Purchase (offline import)"
+SIGNUP_NAME = "Signup (offline import)"
+
+
+def configure(settings, names, single=NAME):
+    settings.STAPEL_ANALYTICS = {
+        "CONVERSION_FEED_TOKEN": TOKEN,
+        "CONVERSION_FEED_CONVERSION_NAME": single,
+        "CONVERSION_FEED_CONVERSION_NAMES": names,
+    }
+
+
+def served_names(client):
+    return {
+        r["Google Click ID"]: r["Conversion Name"]
+        for r in parse(fetch(client).content.decode())
+    }
+
+
+@pytest.mark.django_db
+class TestActionNames:
+    def test_two_actions_each_under_its_mapped_name(self, api_client, settings):
+        configure(settings, {PAID: PAID_NAME, SIGNUP: SIGNUP_NAME})
+        outbox_row(click_id="paid", conversion_action=PAID)
+        outbox_row(click_id="signup", conversion_action=SIGNUP, value=None, currency="")
+        assert served_names(api_client) == {"paid": PAID_NAME, "signup": SIGNUP_NAME}
+
+    def test_a_mapped_paid_action_keeps_its_name(self, api_client, settings):
+        """The single name is NOT a fallback for a row that carries an action."""
+        configure(settings, {PAID: PAID_NAME, SIGNUP: SIGNUP_NAME}, single="Other")
+        outbox_row(click_id="paid", conversion_action=PAID)
+        assert served_names(api_client) == {"paid": PAID_NAME}
+
+    def test_an_unmapped_action_is_not_served_with_an_empty_map(
+        self, api_client, settings, caplog
+    ):
+        configure(settings, {})
+        outbox_row(click_id="paid", conversion_action=PAID)
+        with caplog.at_level("ERROR", logger="stapel_analytics.feed"):
+            response = fetch(api_client)
+        assert response.status_code == 200
+        assert parse(response.content.decode()) == []
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert errors and "1 row(s) not served" in errors[0].getMessage()
+
+    def test_an_unmapped_action_is_not_served_with_one_action_mapped(
+        self, api_client, settings, caplog
+    ):
+        configure(settings, {PAID: PAID_NAME})
+        outbox_row(click_id="paid", conversion_action=PAID)
+        outbox_row(click_id="signup", conversion_action=SIGNUP)
+        with caplog.at_level("ERROR", logger="stapel_analytics.feed"):
+            assert served_names(api_client) == {"paid": PAID_NAME}
+        assert any(
+            SIGNUP in r.getMessage() for r in caplog.records if r.levelname == "ERROR"
+        )
+
+    def test_the_error_repeats_on_every_fetch(self, api_client, settings, caplog):
+        configure(settings, {})
+        outbox_row(conversion_action=PAID)
+        with caplog.at_level("ERROR", logger="stapel_analytics.feed"):
+            fetch(api_client)
+            fetch(api_client)
+        assert len([r for r in caplog.records if r.levelname == "ERROR"]) == 2
+
+    def test_a_second_action_row_never_carries_the_first_action_s_name(
+        self, api_client, settings
+    ):
+        configure(settings, {PAID: PAID_NAME}, single=PAID_NAME)
+        outbox_row(click_id="signup", conversion_action=SIGNUP)
+        body = fetch(api_client).content.decode()
+        assert parse(body) == []
+        assert PAID_NAME not in body
+
+    def test_equal_display_names_serve_nothing(self, api_client, settings, caplog):
+        configure(settings, {PAID: PAID_NAME, SIGNUP: PAID_NAME.upper()})
+        outbox_row(click_id="paid", conversion_action=PAID)
+        outbox_row(click_id="blank", conversion_action="")
+        with caplog.at_level("ERROR", logger="stapel_analytics.feed"):
+            assert served_names(api_client) == {}
+        assert any(r.levelname == "ERROR" for r in caplog.records)
+
+    def test_an_empty_action_with_no_map_is_today_s_row(self, api_client, settings):
+        configure(settings, {})
+        outbox_row(click_id="blank", conversion_action="")
+        served = parse(fetch(api_client).content.decode())
+        assert len(served) == 1
+        assert served[0]["Conversion Name"] == NAME
+        assert served[0]["Conversion Value"] == "49"
+        assert served[0]["Order ID"] == ""
+        assert served[0]["Ad User Data"] == ""
+        assert served[0]["Ad Personalization"] == ""
+
+    def test_an_unmapped_row_cannot_be_rendered_under_any_name(self, settings):
+        configure(settings, {})
+        row = outbox_row(conversion_action=PAID)
+        with pytest.raises(ValueError):
+            feed.row_values(row)
+
+    def test_the_status_names_what_is_held_back(self, settings):
+        configure(settings, {PAID: PAID_NAME})
+        outbox_row(conversion_action=SIGNUP)
+        status = feed.feed_status()
+        assert status["rows_available"] == 0
+        assert status["rows_unmapped"] == 1
+        assert status["unmapped_actions"] == [SIGNUP]
+
+
+@pytest.mark.django_db
+class TestOrderAndConsentColumns:
+    def test_order_id_and_consent_are_rendered(self, api_client):
+        outbox_row(
+            order_id="9f86d081884c7d659a2feaa0c55ad015",
+            ad_user_data="GRANTED",
+            ad_personalization="DENIED",
+        )
+        served = parse(fetch(api_client).content.decode())[0]
+        assert served["Order ID"] == "9f86d081884c7d659a2feaa0c55ad015"
+        assert served["Ad User Data"] == "Granted"
+        assert served["Ad Personalization"] == "Denied"
+
+    def test_a_missing_value_is_a_blank_cell_never_zero(self, api_client):
+        outbox_row(value=None, currency="")
+        body = fetch(api_client).content.decode()
+        served = parse(body)[0]
+        assert served["Conversion Value"] == ""
+        assert ",0," not in body.splitlines()[1]
+
+
+@pytest.mark.django_db
+class TestActionNameChecks:
+    def test_equal_display_names_are_an_error_at_boot(self, settings):
+        from django.core.checks import run_checks
+
+        configure(settings, {PAID: PAID_NAME, SIGNUP: PAID_NAME})
+        assert "analytics.E003" in [m.id for m in run_checks()]
+
+    def test_distinct_names_are_not(self, settings):
+        from django.core.checks import run_checks
+
+        configure(settings, {PAID: PAID_NAME, SIGNUP: SIGNUP_NAME})
+        assert "analytics.E003" not in [m.id for m in run_checks()]
+
+    def test_unmapped_outbox_rows_are_warned_about(self, settings):
+        from django.core.checks import run_checks
+
+        configure(settings, {PAID: PAID_NAME})
+        outbox_row(conversion_action=SIGNUP)
+        ids = [m.id for m in run_checks(databases=["default"])]
+        assert "analytics.W014" in ids
+
+    def test_a_mapped_outbox_is_not(self, settings):
+        from django.core.checks import run_checks
+
+        configure(settings, {PAID: PAID_NAME})
+        outbox_row(conversion_action=PAID)
+        ids = [m.id for m in run_checks(databases=["default"])]
+        assert "analytics.W014" not in ids
+
+    def test_a_map_silences_the_placeholder_warning(self, settings):
+        from django.core.checks import run_checks
+
+        configure(settings, {PAID: PAID_NAME}, single=feed.PLACEHOLDER_CONVERSION_NAME)
+        assert "analytics.W012" not in [m.id for m in run_checks()]

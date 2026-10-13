@@ -31,6 +31,18 @@ class Command(BaseCommand):
         else:
             self.stdout.write("conversion feed: enabled")
         self.stdout.write(f"  conversion name   {status['conversion_name'] or '(unset)'}")
+        for action, name in sorted(status["conversion_names"].items()):
+            self.stdout.write(f"  action name       {action} -> {name}")
+        if status["duplicate_names"]:
+            self.stdout.write(
+                "  SERVING NOTHING   one display name for several actions: "
+                + ", ".join(status["duplicate_names"])
+            )
+        if status["rows_unmapped"]:
+            self.stdout.write(
+                f"  rows held back    {status['rows_unmapped']} (unmapped: "
+                + ", ".join(status["unmapped_actions"]) + ")"
+            )
         self.stdout.write(f"  feed window       {status['window_days']} day(s)")
         self.stdout.write(f"  rows in the feed  {status['rows_available']}")
         self.stdout.write(f"  outbox pending    {status['pending']}")

@@ -304,7 +304,15 @@ DEFAULTS = {
     # is not an error, it is a file that imports zero rows. The default is
     # a placeholder every deployment is expected to replace;
     # `analytics.W012` says so when the feed is on and this was not set.
+    # Names ONLY rows enqueued without a conversion action.
     "CONVERSION_FEED_CONVERSION_NAME": "Offline conversion",
+    # {conversion action resource name: display name}. A row that carries
+    # a conversion action is served only under its entry here; a row whose
+    # action is missing is NOT served (ERROR on every fetch), and two
+    # entries with one display name serve nothing at all. Fail closed: a
+    # row under another action's name is a conversion bidding learns from
+    # and cannot unlearn. `analytics.E003` / `W014` repeat it at boot.
+    "CONVERSION_FEED_CONVERSION_NAMES": {},
 
     # ── Seams (dotted paths; never read from the environment) ────────
     # Decides which id a funnel groups by for one event row: user hash,

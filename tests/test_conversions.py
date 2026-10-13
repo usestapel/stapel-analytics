@@ -747,3 +747,79 @@ class TestBeatSchedule:
 
         assert DEFAULTS["CONVERSION_UPLOAD_SCHEDULE"] == {"minute": "*/15"}
         assert 15 * 60 >= DEFAULTS["GOOGLE_ADS_RETRY_BASE_SECONDS"]
+
+
+# ── Order id and consent ─────────────────────────────────────────────
+
+
+@pytest.mark.django_db
+class TestOrderIdAndConsent:
+    def enqueue(self, **overrides):
+        values = {
+            "click_id": "click-a",
+            "conversion_action": ACTION,
+            "conversion_at": timezone.now() - timedelta(hours=1),
+            "order_id": "9f86d081884c7d659a2feaa0c55ad015",
+        }
+        values.update(overrides)
+        return conversions.enqueue(**values)
+
+    def test_order_id_and_consent_are_stored(self):
+        row, created = self.enqueue(ad_user_data="granted", ad_personalization="DENIED")
+        assert created
+        row.refresh_from_db()
+        assert row.order_id == "9f86d081884c7d659a2feaa0c55ad015"
+        assert (row.ad_user_data, row.ad_personalization) == ("GRANTED", "DENIED")
+
+    def test_consent_defaults_to_unset(self):
+        row, _ = self.enqueue(order_id="")
+        assert (row.order_id, row.ad_user_data, row.ad_personalization) == ("", "", "")
+
+    def test_a_second_row_with_the_same_order_id_is_refused(self):
+        """Another click, another time, one order: one row, the first."""
+        first, _ = self.enqueue()
+        again, created = self.enqueue(
+            click_id="click-b", conversion_at=timezone.now() - timedelta(minutes=5)
+        )
+        assert created is False
+        assert again.pk == first.pk
+        assert again.click_id == "click-a"
+        assert ConversionUpload.objects.count() == 1
+
+    def test_the_database_refuses_it_too(self):
+        from django.db import IntegrityError, transaction
+
+        self.enqueue()
+        with pytest.raises(IntegrityError), transaction.atomic():
+            ConversionUpload.objects.create(
+                click_id="click-b",
+                conversion_action=ACTION,
+                conversion_at=timezone.now(),
+                order_id="9f86d081884c7d659a2feaa0c55ad015",
+            )
+
+    def test_the_same_order_id_under_another_action_is_its_own_row(self):
+        self.enqueue()
+        _row, created = self.enqueue(
+            conversion_action="customers/1234567890/conversionActions/43"
+        )
+        assert created
+
+    def test_blank_order_ids_never_collide(self):
+        self.enqueue(order_id="")
+        _row, created = self.enqueue(order_id="", click_id="click-b")
+        assert created
+
+    def test_unknown_consent_is_refused(self):
+        with pytest.raises(ValueError):
+            self.enqueue(ad_user_data="maybe")
+
+    def test_an_overlong_order_id_is_refused(self):
+        with pytest.raises(ValueError):
+            self.enqueue(order_id="x" * 65)
+
+    def test_the_capability_is_importable_from_the_enqueue_door(self):
+        from stapel_analytics import feed
+
+        assert conversions.FEED_SUPPORTS_ACTION_NAMES is True
+        assert feed.FEED_SUPPORTS_ACTION_NAMES is True

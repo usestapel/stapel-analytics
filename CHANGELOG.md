@@ -1,5 +1,50 @@
 # Changelog
 
+## [0.8.0] — 2026-10-14
+
+### Changed — the conversion feed names each row by its action, and fails closed
+
+Breaking for a feed whose outbox rows carry a `conversion_action`: they are
+served only once that action is in the new map. One migration,
+`0006_conversionupload_order_consent`: three added columns and one partial
+unique constraint, nothing altered or dropped.
+
+- `CONVERSION_FEED_CONVERSION_NAMES = {<conversion action resource name>:
+  <display name>}`. Decided in `feed.feed_rows` on every fetch: a row with a
+  conversion action is served only under its mapped name; a row whose action
+  is missing is not served (it waits; ERROR with the count on every fetch);
+  two entries with one display name (case-insensitive) serve nothing (ERROR).
+  `CONVERSION_FEED_CONVERSION_NAME` now names only rows without an action.
+- System checks: `analytics.E003` (equal display names, feed on) and
+  `analytics.W014` (database check: outbox rows with an unmapped action).
+  `analytics.W012` no longer fires when a map is set.
+- `FEED_SUPPORTS_ACTION_NAMES = True` in `stapel_analytics.feed`, re-exported
+  from `stapel_analytics.conversions`, so a host can refuse to enqueue
+  against an older feed.
+
+### Added — order id and consent per conversion
+
+- `ConversionUpload.order_id` (max 64), `ad_user_data` and
+  `ad_personalization` (`""` / `GRANTED` / `DENIED`). A non-blank order id
+  is unique per conversion action (`anl_conv_order_uniq`).
+- `conversions.enqueue(..., order_id="", ad_user_data="",
+  ad_personalization="")` (and `enqueue_for_user`). A taken
+  `(conversion_action, order_id)` creates nothing and returns
+  `(existing_row, False)`; a differing click or time is logged as a WARNING.
+  Unknown consent values and order ids over 64 characters raise `ValueError`.
+- Feed columns `Order ID`, `Ad User Data`, `Ad Personalization`
+  (`Granted` / `Denied`, empty when unset), the click-conversion template's
+  spelling. `Conversion Value` stays an empty cell when the row has no value.
+- `feed_status()` and `analytics_conversion_feed_status` report the map and
+  the rows held back.
+
+### Docs
+
+- The push door (`deliver`) uses the Google Ads API, whose offline-import
+  path is being migrated to the Data Manager API
+  (support.google.com/google-ads/answer/14274408); the scheduled file import
+  is not affected.
+
 ## [0.7.1] — 2026-09-17
 
 Patch: delete this module's copies of `gdpr.section.erased` and

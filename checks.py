@@ -407,11 +407,17 @@ def check_conversion_feed_name(app_configs, **kwargs):
     failure this module warns about elsewhere, so it warns about it here.
 
     Fires only when a token is configured — a deployment that never turned
-    the feed on has nothing to name.
+    the feed on has nothing to name — and no ``CONVERSION_FEED_CONVERSION_
+    NAMES`` map is set: with a map, this name labels only action-less rows.
     """
-    from .feed import PLACEHOLDER_CONVERSION_NAME, conversion_name, is_enabled
+    from .feed import (
+        PLACEHOLDER_CONVERSION_NAME,
+        conversion_name,
+        conversion_names,
+        is_enabled,
+    )
 
-    if not is_enabled():
+    if not is_enabled() or conversion_names():
         return []
     name = conversion_name()
     if name and name != PLACEHOLDER_CONVERSION_NAME:
@@ -431,6 +437,62 @@ def check_conversion_feed_name(app_configs, **kwargs):
              "conversion action's name exactly as it is spelled in the ads "
              "account (capitalisation included).",
         id="analytics.W012",
+    )]
+
+
+@checks.register(checks.Tags.compatibility)
+def check_conversion_feed_names_distinct(app_configs, **kwargs):
+    """E003 — two conversion actions share one display name.
+
+    The fetch serves nothing in that state (``feed.feed_rows``); this says
+    so at boot instead of at the first empty import.
+    """
+    from .feed import conversion_names, duplicate_display_names, is_enabled
+
+    if not is_enabled():
+        return []
+    duplicates = duplicate_display_names(conversion_names())
+    if not duplicates:
+        return []
+    return [checks.Error(
+        "STAPEL_ANALYTICS['CONVERSION_FEED_CONVERSION_NAMES'] maps several "
+        f"conversion actions to the display name(s) {duplicates!r} — the "
+        "conversion feed serves nothing until every action has its own name.",
+        hint="Give each conversion action its own display name, spelled as "
+             "in the ads account.",
+        id="analytics.E003",
+    )]
+
+
+@checks.register(checks.Tags.database)
+def check_conversion_feed_actions_mapped(app_configs, databases=None, **kwargs):
+    """W014 — the outbox holds rows whose conversion action has no name.
+
+    Those rows are not served (``feed.feed_rows``) until the action is added
+    to ``CONVERSION_FEED_CONVERSION_NAMES``; they wait, they are not lost.
+    A database check: it runs where Django runs those (``migrate``,
+    ``check --database``).
+    """
+    from django.db import DatabaseError
+
+    from .feed import is_enabled, select_rows
+
+    if not databases or not is_enabled():
+        return []
+    try:
+        selection = select_rows()
+    except DatabaseError:
+        return []
+    if not selection.unmapped:
+        return []
+    return [checks.Warning(
+        f"{selection.unmapped} conversion feed row(s) are held back: their "
+        "conversion action is not in "
+        "STAPEL_ANALYTICS['CONVERSION_FEED_CONVERSION_NAMES'] "
+        f"({', '.join(selection.unmapped_actions)}).",
+        hint="Map each conversion action resource name to its display name "
+             "in the ads account.",
+        id="analytics.W014",
     )]
 
 
@@ -498,7 +560,9 @@ __all__ = [
     "check_adapters",
     "check_attribution_middleware",
     "check_bridge_targets",
+    "check_conversion_feed_actions_mapped",
     "check_conversion_feed_name",
+    "check_conversion_feed_names_distinct",
     "check_conversion_upload_credentials",
     "check_event_store_installed",
     "check_events_file",

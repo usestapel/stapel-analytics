@@ -138,6 +138,11 @@ be *attempted* comes back `pending`, not `rejected`: the row waits and
 `manage.py analytics_upload_conversions` retries it on a capped backoff.
 `--dry-run` lists what would go out and writes nothing at all.
 
+The upload goes through the Google Ads API, whose offline-import path is
+being migrated to the Data Manager API
+(support.google.com/google-ads/answer/14274408). The scheduled file import
+below is a Data manager source and is not affected.
+
 `clicked_at` is optional because most callers do not have it, and
 load-bearing because Google's 90-day window is measured from the **click**.
 With it, that rule is enforced locally. Without it the module falls back to
@@ -154,7 +159,7 @@ fetches on its own schedule — a URL, a token, no credentials of ours:
 ```bash
 curl -u "google:$CONVERSION_FEED_TOKEN" \
      https://example.com/analytics/api/v1/conversions/google-ads.csv
-Google Click ID,GBRAID,WBRAID,Conversion Name,Conversion Time,Conversion Value,Conversion Currency
+Google Click ID,GBRAID,WBRAID,Conversion Name,Conversion Time,Conversion Value,Conversion Currency,Order ID,Ad User Data,Ad Personalization
 ```
 
 In Google Ads Data Manager (HTTPS → Conversions → offline import):
@@ -165,6 +170,15 @@ In Google Ads Data Manager (HTTPS → Conversions → offline import):
 
 Do not put the token in the URL when the fetcher can send a password.
 `Authorization: Bearer` and `?token=` remain for fetchers that cannot.
+
+Each conversion action gets its own `Conversion Name` through
+`CONVERSION_FEED_CONVERSION_NAMES = {"customers/…/conversionActions/42":
+"Purchase (offline import)", …}`, and the feed **fails closed**: a row whose
+action is not in the map is not served (an ERROR on every fetch), two
+actions with one display name serve nothing, and
+`CONVERSION_FEED_CONVERSION_NAME` names only rows without an action.
+`Order ID`, `Ad User Data` and `Ad Personalization` (`Granted` / `Denied`)
+come from `enqueue(..., order_id=, ad_user_data=, ad_personalization=)`.
 
 It ships **off** — an empty `CONVERSION_FEED_TOKEN` is a 404, because the
 file carries click identifiers and payment values. Serving it never
