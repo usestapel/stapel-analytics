@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased] — proposed 0.8.1
+
+### Added — `docs/capabilities.json`, emitted and drift-gated
+
+The module had no capabilities document, so the fleet's capability index
+could not see it. With no OpenAPI triad yet, `_capabilities.py` builds it on
+`stapel_tools.surface.build_static_capabilities` (as stapel-core does) and
+reads the axes — `REGISTRY_MODE`, `REQUIRE_WRITE_KEY`, `PII_MODE`,
+`RETENTION_DAYS`, `FANOUT_ENABLED` — from `conf.DEFAULTS` rather than
+retyping them; only prose is curated in `docs/capabilities.meta.json`. The
+surface is derived from `services.py` / `privacy.py`. `make contract` /
+`make contract-check` and `tests/test_capabilities.py` gate drift (CI now
+installs stapel-tools for it); the wheel ships the document.
+
 ## [0.8.0] — 2026-10-14
 
 ### Changed — the conversion feed names each row by its action, and fails closed

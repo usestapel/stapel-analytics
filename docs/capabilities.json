@@ -1,0 +1,164 @@
+{
+  "module": "stapel-analytics",
+  "version": "0.8.0",
+  "provides": "The backend half of the analytics standard: an ingest endpoint for @stapel/analytics batches with an event registry and a PII guard, server-side track() for modules, a comm bridge from business Actions, funnels and event reports over the core event store, adapter fan-out, last-touch click attribution, offline click-conversion upload, and GDPR erasure of the event stream.",
+  "axes": [
+    {
+      "key": "REGISTRY_MODE",
+      "kind": "enum",
+      "default": "warn",
+      "group": "analytics.ingest",
+      "curated": {
+        "summary": "What happens to an event name the registry does not declare: warn (store it and mark it, the default), reject (refuse the batch) or off.",
+        "business_label": "Unregistered events"
+      }
+    },
+    {
+      "key": "REQUIRE_WRITE_KEY",
+      "kind": "bool",
+      "default": false,
+      "group": "analytics.ingest",
+      "curated": {
+        "summary": "Off by default. On: an ingest batch without a recognised write key is refused with 401, so only configured sources can write analytics.",
+        "business_label": "Only keyed sources may send events"
+      }
+    },
+    {
+      "key": "PII_MODE",
+      "kind": "enum",
+      "default": "reject",
+      "group": "analytics.privacy",
+      "curated": {
+        "summary": "Ships reject: a property value that looks like personal data refuses the event. strip removes the value, warn stores it and logs, off disables the guard.",
+        "business_label": "Personal data in event properties"
+      }
+    },
+    {
+      "key": "RETENTION_DAYS",
+      "kind": "enum",
+      "default": 400,
+      "group": "analytics.privacy",
+      "curated": {
+        "summary": "Days an analytics event is kept before the purge drops it (400 by default); None keeps events forever, which a deployment states rather than drifts into.",
+        "business_label": "How long events are kept"
+      }
+    },
+    {
+      "key": "FANOUT_ENABLED",
+      "kind": "bool",
+      "default": true,
+      "group": "analytics.fanout",
+      "curated": {
+        "summary": "On by default: recorded events are announced as analytics.events.recorded and delivered to the configured adapters. Off: events are stored only.",
+        "business_label": "Forward events to analytics tools"
+      }
+    }
+  ],
+  "extension_points": [
+    {
+      "name": "EVENTS",
+      "kind": "merge_registry",
+      "summary": "The event vocabulary this deployment admits ({name: definition | None}, merged over EVENTS_FILE and runtime register_event()); None removes an entry."
+    },
+    {
+      "name": "ADAPTERS",
+      "kind": "merge_registry",
+      "summary": "Fan-out targets for recorded events ({name: spec | None}, merged over the built-ins and runtime register_adapter())."
+    },
+    {
+      "name": "COMM_BRIDGE",
+      "kind": "setting",
+      "summary": "{action_name: event_name | spec}: turn a business comm Action (payment.completed, ...) into an analytics event without code in the emitting module."
+    },
+    {
+      "name": "PII_GUARD",
+      "kind": "dotted_path",
+      "summary": "The PII heuristic callable(value) -> bool, same contract as the frontend guard. Never read from the environment."
+    },
+    {
+      "name": "SUBJECT_RESOLVER",
+      "kind": "dotted_path",
+      "summary": "Which id a funnel groups one event row by (user hash, else anonymous id, else session id). Never read from the environment."
+    },
+    {
+      "name": "INGEST_AUTHENTICATION",
+      "kind": "dotted_path_list",
+      "summary": "Authenticator classes for the ingest view only."
+    }
+  ],
+  "surface": [
+    {
+      "name": "guard_props",
+      "kind": "gate_function",
+      "path": "stapel_analytics.privacy.guard_props",
+      "intent": "Apply the PII mode to an event's props: return them cleaned, or raise in reject mode. Every path that stores props goes through it."
+    },
+    {
+      "name": "hash_user_id",
+      "kind": "factory",
+      "path": "stapel_analytics.privacy.hash_user_id",
+      "intent": "The subject key of a person (sha256 of salt + user id) — the same key the frontend facade computes, so funnels join and erasure finds the rows."
+    },
+    {
+      "name": "looks_like_pii",
+      "kind": "predicate",
+      "path": "stapel_analytics.privacy.looks_like_pii",
+      "intent": "The default PII heuristic for one value (swappable through PII_GUARD); reuse it rather than writing a second guard that disagrees."
+    },
+    {
+      "name": "pii_mode",
+      "kind": "factory",
+      "path": "stapel_analytics.privacy.pii_mode",
+      "intent": "The effective PII_MODE (reject|strip|warn|off) — read it through this, not the setting."
+    },
+    {
+      "name": "check_write_key",
+      "kind": "gate_function",
+      "path": "stapel_analytics.services.check_write_key",
+      "intent": "Resolve an ingest body's source from its write key, refusing an unrecognised key when REQUIRE_WRITE_KEY is on — the gate a custom ingest path calls before recording."
+    },
+    {
+      "name": "delete_funnel",
+      "kind": "factory",
+      "path": "stapel_analytics.services.delete_funnel",
+      "intent": "Delete an authored funnel (declared ones are refused by the view)."
+    },
+    {
+      "name": "purge_events",
+      "kind": "factory",
+      "path": "stapel_analytics.services.purge_events",
+      "intent": "Drop analytics events past the retention horizon and return how many — what the purge task and command run."
+    },
+    {
+      "name": "record_batch",
+      "kind": "factory",
+      "path": "stapel_analytics.services.record_batch",
+      "intent": "Record one ingest body (registry check, PII guard, clock correction) and return the receipt; the single write path behind POST /events."
+    },
+    {
+      "name": "save_funnel",
+      "kind": "factory",
+      "path": "stapel_analytics.services.save_funnel",
+      "intent": "Create or update a funnel row after validating the whole rule; the write path the API and a project's seed share."
+    },
+    {
+      "name": "track",
+      "kind": "factory",
+      "path": "stapel_analytics.services.track",
+      "intent": "Record ONE server-side event from a module — the in-process twin of the analytics.track Function, so a server funnel step lands in the same stream as the browser's."
+    },
+    {
+      "name": "validate_steps",
+      "kind": "gate_function",
+      "path": "stapel_analytics.services.validate_steps",
+      "intent": "Refuse a funnel whose steps can never be reached before it is saved."
+    }
+  ],
+  "requires": [
+    {
+      "module": "stapel-core",
+      "optional": false,
+      "reason": "the event store the events live in, the comm bus (Functions, the bridge, fan-out Actions), GDPR owner registration, AppSettings, JWT auth and the error envelope"
+    }
+  ]
+}

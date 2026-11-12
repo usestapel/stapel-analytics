@@ -75,9 +75,10 @@ packages = [
 # A module that keeps them repo-only publishes code an agent cannot read.
 # Every pattern below matches real files in the tree: a package-data entry
 # matching nothing is a wheel that silently ships less than the repo.
-# docs/errors.json is the one contract artifact emitted so far (gated by
-# tests/test_error_keys.py); schema/flows/capabilities are not — MODULE.md
-# §10 — so their patterns are absent rather than dead.
+# docs/errors.json (gated by tests/test_error_keys.py) and
+# docs/capabilities.json (tests/test_capabilities.py) are emitted;
+# schema/flows are not — MODULE.md §10 — so their patterns are absent rather
+# than dead.
 stapel_analytics = [
     "py.typed",
     "CONFIG.MD",
@@ -86,6 +87,7 @@ stapel_analytics = [
     "schemas/**/*.json",
     "translations/*.json",
     "docs/errors.json",
+    "docs/capabilities.json",
 ]
 
 [tool.ruff]

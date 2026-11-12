@@ -5,7 +5,7 @@
 # the same verdict CI reaches.
 PYTHON ?= python3
 
-.PHONY: lint test emit-check migration-lint migration-check check
+.PHONY: lint test emit-check migration-lint migration-check contract contract-check check
 
 # The ruff selection the git hooks and CI both use (single source: pyproject).
 lint:
@@ -31,4 +31,13 @@ migration-lint:
 migration-check:
 	$(PYTHON) manage.py makemigrations --check --dry-run
 
-check: lint emit-check migration-check test
+# docs/capabilities.json (stapel_analytics._capabilities): axes read from
+# conf.DEFAULTS, surface derived from the meta layer's surface_roots, prose
+# from the curated docs/capabilities.meta.json. Re-run after a version bump.
+contract:
+	$(PYTHON) -m stapel_analytics._capabilities
+
+contract-check:
+	$(PYTHON) -m stapel_analytics._capabilities --check
+
+check: lint emit-check migration-check contract-check test
