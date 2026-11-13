@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — proposed 0.8.1
+## [0.8.1] — 2026-11-13
 
 ### Added — `docs/capabilities.json`, emitted and drift-gated
 
