@@ -1142,14 +1142,14 @@
         "type": "object",
         "description": "Conversion by step over a period, optionally versus the one before.",
         "properties": {
-          "slug": {
-            "type": "string"
-          },
           "steps": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/FunnelStep"
             }
+          },
+          "slug": {
+            "type": "string"
           },
           "entered": {
             "type": "integer"
@@ -1192,26 +1192,33 @@
           }
         },
         "required": [
-          "slug"
+          "slug",
+          "steps"
         ]
       },
       "FunnelStep": {
         "type": "object",
         "description": "One step of a computed report.",
         "properties": {
+          "rate_from_first": {
+            "type": "number",
+            "format": "double",
+            "maximum": 1,
+            "minimum": 0,
+            "description": "Ratio in [0, 1]: this step's count over the first step's."
+          },
+          "rate_from_previous": {
+            "type": "number",
+            "format": "double",
+            "maximum": 1,
+            "minimum": 0,
+            "description": "Ratio in [0, 1]: this step's count over the previous step's (1 on the first step when it has subjects)."
+          },
           "name": {
             "type": "string"
           },
           "count": {
             "type": "integer"
-          },
-          "rate_from_first": {
-            "type": "number",
-            "format": "double"
-          },
-          "rate_from_previous": {
-            "type": "number",
-            "format": "double"
           },
           "dropoff": {
             "type": "integer"

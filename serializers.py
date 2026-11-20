@@ -21,6 +21,7 @@ from .dto import (
     EventsReport,
     FunnelDefinition,
     FunnelReportDTO,
+    FunnelStep,
     IngestReceipt,
 )
 from .presenters import get_funnel_presenter
@@ -46,7 +47,30 @@ class FunnelDefinitionSerializer(StapelDataclassSerializer):
         dataclass = FunnelDefinition
 
 
+class FunnelStepSerializer(StapelDataclassSerializer):
+    """One step of a computed report.
+
+    The two rates are RATIOS in [0, 1] (step counts never grow along a
+    funnel), declared with their bounds so no reader takes them for money or
+    for a percentage.
+    """
+
+    rate_from_first = serializers.FloatField(
+        min_value=0, max_value=1,
+        help_text="Ratio in [0, 1]: this step's count over the first step's.",
+    )
+    rate_from_previous = serializers.FloatField(
+        min_value=0, max_value=1,
+        help_text="Ratio in [0, 1]: this step's count over the previous step's (1 on the first step when it has subjects).",
+    )
+
+    class Meta:
+        dataclass = FunnelStep
+
+
 class FunnelReportSerializer(StapelDataclassSerializer):
+    steps = FunnelStepSerializer(many=True)
+
     class Meta:
         dataclass = FunnelReportDTO
 

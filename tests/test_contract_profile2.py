@@ -82,3 +82,16 @@ def test_no_action_declares_what_its_mount_ignores():
     seen = {cls.__name__ for _r, _c, cls, _a in viewset_routes()}
     assert seen == VIEWSETS, f"roster saw {sorted(seen)}"
     assert dead_action_declarations() == []
+
+
+@pytest.mark.parametrize("artifact", ["schema.json", "schema.v2.json"])
+@pytest.mark.parametrize("field", ["rate_from_first", "rate_from_previous"])
+def test_funnel_rates_are_bounded_ratios(artifact, field):
+    """A ratio in [0, 1], said in the contract: not money, not a percentage."""
+    import json as _json
+    from pathlib import Path as _Path
+
+    doc = _json.loads((_Path(__file__).resolve().parent.parent / "docs" / artifact).read_text())
+    prop = doc["components"]["schemas"]["FunnelStep"]["properties"][field]
+    assert (prop["type"], prop["minimum"], prop["maximum"]) == ("number", 0, 1)
+    assert "Ratio" in prop["description"]

@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.8.4] — 2026-11-20
+
+Patch. No migration. Contract only; the wire is unchanged.
+
+### Fixed — funnel rates are declared as bounded ratios
+
+- `FunnelStep.rate_from_first` / `rate_from_previous` carry `minimum: 0`,
+  `maximum: 1` and a description saying they are ratios (step counts never
+  grow along a funnel). They were a bare `number/double`, which a client
+  generator's money-by-name rule reads as a money amount in a double.
+
 ## [0.8.3] — 2026-11-20
 
 Patch. No migration. Requires stapel-core 0.99.3.
