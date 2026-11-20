@@ -1,6 +1,6 @@
 {
   "module": "stapel-analytics",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "provides": "The backend half of the analytics standard: an ingest endpoint for @stapel/analytics batches with an event registry and a PII guard, server-side track() for modules, a comm bridge from business Actions, funnels and event reports over the core event store, adapter fan-out, last-touch click attribution, offline click-conversion upload, and GDPR erasure of the event stream.",
   "axes": [
     {

@@ -61,7 +61,7 @@ jobs:
         run: python -m stapel_core.lint.emit_check .
 
       - name: Install test dependencies
-        run: pip install pytest pytest-django pytest-cov "stapel-tools>=0.27,<1"
+        run: pip install pytest pytest-django pytest-cov "stapel-tools>=0.84.0,<1"
 
       - name: Tests with coverage
         run: |
@@ -151,7 +151,7 @@ jobs:
         run: python -m stapel_core.lint.emit_check .
 
       - name: Install test dependencies
-        run: pip install pytest pytest-django pytest-cov "stapel-tools>=0.27,<1"
+        run: pip install pytest pytest-django pytest-cov "stapel-tools>=0.84.0,<1"
 
       - name: Tests with coverage
         run: |

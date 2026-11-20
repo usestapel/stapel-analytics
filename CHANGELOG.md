@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.8.2] — 2026-11-20
+
+Patch. No migration, no consumer edit. Requires stapel-core 0.99.2.
+
+- `errors.json` regenerated under stapel-core 0.99 (`error.429.rate_limit`
+  text, `param_types`, core's `error.400.too_many_ids`); the committed-shape
+  test accepts `param_types` (it failed on the new field). CI's stapel-tools
+  floor is 0.84.0.
+
 ## [0.8.1] — 2026-11-13
 
 ### Added — `docs/capabilities.json`, emitted and drift-gated
