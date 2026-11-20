@@ -59,19 +59,59 @@ class EventsReportSerializer(StapelDataclassSerializer):
 # ── Requests ─────────────────────────────────────────────────────────
 
 
+class IngestEventSerializer(serializers.Serializer):
+    """One event of a batch, in the facade's spelling.
+
+    The collector also reads the snake_case spellings (``user_hash``,
+    ``event_id``) and ``timestamp``/``traits`` aliases; this is the shape a
+    generated client sends. Faults are reported per event in the receipt,
+    never by refusing the batch.
+    """
+
+    id = serializers.CharField(
+        required=False, help_text="Client event id, echoed into the store as event_id."
+    )
+    kind = serializers.ChoiceField(choices=["track", "page", "identify"], default="track")
+    name = serializers.CharField(
+        required=False, help_text="Event name; a registered one for kind=track."
+    )
+    props = serializers.DictField(required=False, help_text="Event properties (PII-guarded).")
+    userHash = serializers.CharField(  # noqa: N815 — the facade's wire spelling
+        required=False, help_text="sha256 hex of the account id, after identify()."
+    )
+    ts = serializers.IntegerField(
+        required=False, help_text="Epoch milliseconds; server time when absent."
+    )
+    anon_id = serializers.CharField(required=False, help_text="Overrides the batch anon_id.")
+    session_id = serializers.CharField(required=False, help_text="Overrides the batch session_id.")
+    source = serializers.CharField(required=False, help_text="Overrides the batch source.")
+
+
+class IngestContextSerializer(serializers.Serializer):
+    """The emitter of a batch, copied onto every stored event."""
+
+    platform = serializers.CharField(required=False, help_text="ios, android, desktop, web")
+    app_version = serializers.CharField(required=False)
+    os_version = serializers.CharField(required=False)
+    locale = serializers.CharField(required=False, help_text="BCP 47 tag, e.g. en-US")
+    sdk = serializers.CharField(required=False, help_text="Collector name and version")
+
+
 class IngestSerializer(serializers.Serializer):
-    """The batch, as ``@stapel/analytics`` sends it.
+    """The batch, as ``@stapel/analytics`` and the native collector send it.
 
     ``write_key`` is optional because the shipped facade omits it unless a
     host configured one; ``anon_id`` / ``session_id`` are batch-level
     defaults the current facade does not send at all and a server-side
-    producer does. See ``ingest.py`` for the whole wire contract.
+    producer does; ``context`` describes the emitter. See ``ingest.py`` for
+    the whole wire contract.
     """
 
-    events = serializers.ListField(child=serializers.DictField(), allow_empty=True)
+    events = IngestEventSerializer(many=True, allow_empty=True)
     write_key = serializers.CharField(required=False, allow_blank=True)
     anon_id = serializers.CharField(required=False, allow_blank=True)
     session_id = serializers.CharField(required=False, allow_blank=True)
+    context = IngestContextSerializer(required=False)
 
 
 class FunnelCreateSerializer(serializers.Serializer):
@@ -130,6 +170,8 @@ __all__ = [
     "FunnelReportSerializer",
     "FunnelSerializer",
     "IngestReceiptSerializer",
+    "IngestContextSerializer",
+    "IngestEventSerializer",
     "IngestSerializer",
     "ReportQuerySerializer",
 ]

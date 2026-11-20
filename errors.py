@@ -114,6 +114,7 @@ BATCH_KEYS = {
     "batch_not_object": ERR_400_BATCH_SHAPE,
     "batch_missing_events": ERR_400_BATCH_SHAPE,
     "batch_events_not_list": ERR_400_BATCH_SHAPE,
+    "batch_context_not_object": ERR_400_BATCH_SHAPE,
     "batch_too_large": ERR_400_BATCH_TOO_LARGE,
     "body_too_large": ERR_413_BODY_TOO_LARGE,
     "write_key": ERR_401_WRITE_KEY,

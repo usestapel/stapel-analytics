@@ -63,6 +63,10 @@ jobs:
       - name: Install test dependencies
         run: pip install pytest pytest-django pytest-cov "stapel-tools>=0.84.0,<1"
 
+      - name: Contract drift (make contract-check, emitted on 3.12)
+        if: matrix.python-version == '3.12'
+        run: make contract-check PYTHON=python
+
       - name: Tests with coverage
         run: |
           pytest tests/ \

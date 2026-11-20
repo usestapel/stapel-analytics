@@ -1,0 +1,963 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "",
+    "version": "0.0.0"
+  },
+  "paths": {
+    "/analytics/api/events": {
+      "post": {
+        "operationId": "analytics_api_events_create",
+        "description": "``POST`` a batch of events — the collector endpoint of the facade.\n\nAnswers **202** with a receipt, even when some events were refused: the\nbatch WAS processed, and a 4xx would make the facade retry the same\ntwenty events until its ladder gives up and drops all of them. The\nreceipt says exactly what happened to each one.\n\n**Permissions:** `AllowAny`",
+        "tags": [
+          "Analytics"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Ingest"
+              }
+            },
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Ingest"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Ingest"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {}
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestReceipt"
+                }
+              }
+            },
+            "description": ""
+          }
+        }
+      }
+    },
+    "/analytics/api/v1/conversions/google-ads.csv": {
+      "get": {
+        "operationId": "analytics_api_v1_conversions_google_ads_csv_retrieve",
+        "description": "``GET`` the offline click-conversion outbox as a CSV file.\n\nThe pull half of the conversion story: instead of this deployment\ncalling an ad platform's API, the platform's data manager fetches this\nURL on a schedule it owns. Everything about the response follows from\nthat inversion.\n\n**It is a file, not an API resource.** ``text/csv`` with the platform's\nown column headers, no envelope, no pagination — the consumer is an\nimporter reading a template, not a client this module gets to teach a\nformat to. That is also why the errors below are the only JSON it can\never answer with.\n\nIt carries the module's serializer seam like every other view here and\nleaves both slots empty, because a file has no serializer to swap. The\nrule stays \"every view carries it\" rather than \"every view except one\",\nwhich is a rule a reader can check.\n\n**Authentication is a token, not a session.** There is no user on the\nfar end; there is a scheduler holding a secret. ``AllowAny`` with an\nEMPTY authenticator list, and the whole gate is\n:func:`feed.credential_matches`:\n\n- no token configured -> **404**. The feed ships off, and off means the\n  URL does not exist. A 401 here would be an advertisement.\n- token configured, wrong or absent one presented -> **401** with\n  ``WWW-Authenticate: Basic realm=\"conversions feed\"``. The challenge\n  is for a fetcher that will not send its password until asked —\n  Google's data manager offers a URL, a username and a password and\n  nothing else, so ``Authorization: Basic`` with the token as the\n  password is the door it walks through; ``Bearer`` and ``?token=``\n  stay open for fetchers that can do better or worse.\n- a match -> the file, with ``Cache-Control: no-store``.\n\nEvery attempt is logged at INFO with the scheme, the user-agent and the\nstatus — never the credential — so a host can see the first successful\nfetch by the platform's connector land.\n\n``get_authenticators`` is emptied for the same reason ``IngestView``\nresolves its own: DRF would otherwise read ``Authorization: Bearer ...``\nwith whatever authenticator the host has configured project-wide and\n401 the puller before this view ever sees the header it is holding.\n\n**The read has one side effect, and it is the point.** Serving the file\nwrites a :class:`~stapel_analytics.models.ConversionFeedFetch` receipt,\nbecause a pull leaves no other trace that it happened and \"has the\nfirst load landed\" is the question this endpoint exists to make\nanswerable. It also settles rows whose click has aged out\n(:func:`conversions.expire_stale`) — in a pull-only deployment nothing\nelse ever does, and an outbox that only grows is the failure this\nmodule already knows how to have.\n\n**Permissions:** `AllowAny`",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "token",
+            "schema": {
+              "type": "string"
+            },
+            "description": "The feed token, for a fetcher that can only be given a URL. Prefer Authorization: Basic (any username, the token as the password) or Authorization: Bearer."
+          }
+        ],
+        "tags": [
+          "Analytics"
+        ],
+        "security": [
+          {}
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": ""
+          }
+        }
+      }
+    },
+    "/analytics/api/v1/event-registry": {
+      "get": {
+        "operationId": "analytics_api_v1_event_registry_retrieve",
+        "description": "What this deployment declares, how it enforces it, and what mirrors it.\n\nReadable by any authenticated caller: an app-layer developer needs the\nvocabulary to fire against it, and the registry names events, never\npeople.\n\n**Permissions:** `HasWorkspaceMandateIfScoped`",
+        "tags": [
+          "Analytics"
+        ],
+        "security": [
+          {
+            "JWTCookieAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventRegistry"
+                }
+              }
+            },
+            "description": ""
+          }
+        }
+      }
+    },
+    "/analytics/api/v1/events": {
+      "post": {
+        "operationId": "analytics_api_v1_events_create",
+        "description": "``POST`` a batch of events — the collector endpoint of the facade.\n\nAnswers **202** with a receipt, even when some events were refused: the\nbatch WAS processed, and a 4xx would make the facade retry the same\ntwenty events until its ladder gives up and drops all of them. The\nreceipt says exactly what happened to each one.\n\n**Permissions:** `AllowAny`",
+        "tags": [
+          "Analytics"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Ingest"
+              }
+            },
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Ingest"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Ingest"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {}
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestReceipt"
+                }
+              }
+            },
+            "description": ""
+          }
+        }
+      }
+    },
+    "/analytics/api/v1/funnels": {
+      "get": {
+        "operationId": "analytics_api_v1_funnels_list",
+        "description": "List funnels (authored + declared), or author a new one.\n\n**Permissions:** `HasWorkspaceMandateIfScoped`",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "mine",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "tags": [
+          "Analytics"
+        ],
+        "security": [
+          {
+            "JWTCookieAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/FunnelDefinition"
+                  }
+                }
+              }
+            },
+            "description": ""
+          }
+        }
+      },
+      "post": {
+        "operationId": "analytics_api_v1_funnels_create",
+        "description": "List funnels (authored + declared), or author a new one.\n\n**Permissions:** `HasWorkspaceMandateIfScoped`",
+        "tags": [
+          "Analytics"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FunnelCreate"
+              }
+            },
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/FunnelCreate"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/FunnelCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "security": [
+          {
+            "JWTCookieAuth": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FunnelPresenterDTO"
+                },
+                "examples": {
+                  "FunnelPresenterDTO": {
+                    "value": {
+                      "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                      "slug": "checkout",
+                      "title": "Checkout",
+                      "description": "",
+                      "steps": [
+                        "flow.checkout.started",
+                        "payment_completed"
+                      ],
+                      "window_seconds": 604800,
+                      "is_active": true,
+                      "source": "db"
+                    }
+                  }
+                }
+              }
+            },
+            "description": ""
+          }
+        }
+      }
+    },
+    "/analytics/api/v1/funnels/{slug}": {
+      "get": {
+        "operationId": "analytics_api_v1_funnels_retrieve",
+        "description": "Read, re-author or delete one funnel.\n\n**Permissions:** `HasWorkspaceMandateIfScoped`",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "tags": [
+          "Analytics"
+        ],
+        "security": [
+          {
+            "JWTCookieAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FunnelPresenterDTO"
+                },
+                "examples": {
+                  "FunnelPresenterDTO": {
+                    "value": {
+                      "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                      "slug": "checkout",
+                      "title": "Checkout",
+                      "description": "",
+                      "steps": [
+                        "flow.checkout.started",
+                        "payment_completed"
+                      ],
+                      "window_seconds": 604800,
+                      "is_active": true,
+                      "source": "db"
+                    }
+                  }
+                }
+              }
+            },
+            "description": ""
+          }
+        }
+      },
+      "patch": {
+        "operationId": "analytics_api_v1_funnels_partial_update",
+        "description": "Read, re-author or delete one funnel.\n\n**Permissions:** `HasWorkspaceMandateIfScoped`",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "tags": [
+          "Analytics"
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchedFunnelPatch"
+              }
+            },
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchedFunnelPatch"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchedFunnelPatch"
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTCookieAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FunnelPresenterDTO"
+                },
+                "examples": {
+                  "FunnelPresenterDTO": {
+                    "value": {
+                      "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                      "slug": "checkout",
+                      "title": "Checkout",
+                      "description": "",
+                      "steps": [
+                        "flow.checkout.started",
+                        "payment_completed"
+                      ],
+                      "window_seconds": 604800,
+                      "is_active": true,
+                      "source": "db"
+                    }
+                  }
+                }
+              }
+            },
+            "description": ""
+          }
+        }
+      },
+      "delete": {
+        "operationId": "analytics_api_v1_funnels_destroy",
+        "description": "Read, re-author or delete one funnel.\n\n**Permissions:** `HasWorkspaceMandateIfScoped`",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "tags": [
+          "Analytics"
+        ],
+        "security": [
+          {
+            "JWTCookieAuth": []
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No response body"
+          }
+        }
+      }
+    },
+    "/analytics/api/v1/funnels/{slug}/report": {
+      "get": {
+        "operationId": "analytics_api_v1_funnels_report_retrieve",
+        "description": "Conversion by step over a period, optionally versus the period before.\n\n**Permissions:** `HasWorkspaceMandateIfScoped`",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "tags": [
+          "Analytics"
+        ],
+        "security": [
+          {
+            "JWTCookieAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FunnelReportDTO"
+                }
+              }
+            },
+            "description": ""
+          }
+        }
+      }
+    },
+    "/analytics/api/v1/reports/events": {
+      "get": {
+        "operationId": "analytics_api_v1_reports_events_retrieve",
+        "description": "Counts grouped by ``name`` / ``source`` / ``kind`` over a period.\n\nStaff-only: unlike a funnel (a definition someone authored), this is the\nraw shape of the deployment's traffic.\n\n**Permissions:** `IsStaffUser`",
+        "tags": [
+          "Analytics"
+        ],
+        "security": [
+          {
+            "JWTCookieAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventsReport"
+                }
+              }
+            },
+            "description": ""
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "EventDefinition": {
+        "type": "object",
+        "description": "One registry entry, in the shape ``events.json`` uses.",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "props": {
+            "type": "object",
+            "additionalProperties": {}
+          },
+          "flow": {
+            "type": "string",
+            "nullable": true
+          },
+          "builtin": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "EventRegistry": {
+        "type": "object",
+        "description": "The vocabulary this deployment admits, plus how it enforces it.",
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EventDefinition"
+            }
+          },
+          "mode": {
+            "type": "string"
+          },
+          "adapters": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "bridged_actions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "EventsReport": {
+        "type": "object",
+        "description": "Counts grouped by a payload field over a period — the dashboard's\ncheap half (``store.rollup``).",
+        "properties": {
+          "buckets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RollupBucket"
+            }
+          },
+          "total": {
+            "type": "integer"
+          },
+          "group_by": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "start": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "end": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        }
+      },
+      "FunnelCreate": {
+        "type": "object",
+        "properties": {
+          "slug": {
+            "type": "string",
+            "maxLength": 100,
+            "pattern": "^[-a-zA-Z0-9_]+$"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 200
+            }
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "description": {
+            "type": "string"
+          },
+          "window_seconds": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "is_active": {
+            "type": "boolean",
+            "default": true
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          }
+        },
+        "required": [
+          "slug",
+          "steps"
+        ]
+      },
+      "FunnelDefinition": {
+        "type": "object",
+        "description": "A funnel as the API presents it.",
+        "properties": {
+          "slug": {
+            "type": "string"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "window_seconds": {
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "is_active": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "slug"
+        ]
+      },
+      "FunnelPresenterDTO": {
+        "type": "object",
+        "description": "Presents an authored funnel row.",
+        "properties": {
+          "slug": {
+            "type": "string",
+            "description": "slug"
+          },
+          "title": {
+            "type": "string",
+            "description": "title"
+          },
+          "description": {
+            "type": "string",
+            "description": "description"
+          },
+          "window_seconds": {
+            "type": "integer",
+            "description": "window seconds"
+          },
+          "is_active": {
+            "type": "boolean",
+            "description": "is active"
+          },
+          "id": {
+            "type": "string"
+          },
+          "steps": {
+            "type": "array",
+            "items": {},
+            "description": "Ordered event names a subject must pass through."
+          },
+          "source": {
+            "type": "string",
+            "description": "'db' (authored here) or 'settings' (declared in the project spec and read-only over the API)."
+          }
+        },
+        "required": [
+          "description",
+          "id",
+          "is_active",
+          "slug",
+          "source",
+          "steps",
+          "title",
+          "window_seconds"
+        ]
+      },
+      "FunnelReportDTO": {
+        "type": "object",
+        "description": "Conversion by step over a period, optionally versus the one before.",
+        "properties": {
+          "slug": {
+            "type": "string"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FunnelStep"
+            }
+          },
+          "entered": {
+            "type": "integer"
+          },
+          "completed": {
+            "type": "integer"
+          },
+          "conversion": {
+            "type": "number",
+            "format": "double"
+          },
+          "window_seconds": {
+            "type": "integer"
+          },
+          "start": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "end": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "compare_start": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "compare_end": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "scanned": {
+            "type": "integer"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "slug"
+        ]
+      },
+      "FunnelStep": {
+        "type": "object",
+        "description": "One step of a computed report.",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer"
+          },
+          "rate_from_first": {
+            "type": "number",
+            "format": "double"
+          },
+          "rate_from_previous": {
+            "type": "number",
+            "format": "double"
+          },
+          "dropoff": {
+            "type": "integer"
+          },
+          "previous_count": {
+            "type": "integer",
+            "nullable": true
+          },
+          "delta": {
+            "type": "integer",
+            "nullable": true
+          }
+        },
+        "required": [
+          "count",
+          "dropoff",
+          "name",
+          "rate_from_first",
+          "rate_from_previous"
+        ]
+      },
+      "Ingest": {
+        "type": "object",
+        "description": "The batch, as ``@stapel/analytics`` and the native collector send it.\n\n``write_key`` is optional because the shipped facade omits it unless a\nhost configured one; ``anon_id`` / ``session_id`` are batch-level\ndefaults the current facade does not send at all and a server-side\nproducer does; ``context`` describes the emitter. See ``ingest.py`` for\nthe whole wire contract.",
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IngestEvent"
+            }
+          },
+          "write_key": {
+            "type": "string"
+          },
+          "anon_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "context": {
+            "$ref": "#/components/schemas/IngestContext"
+          }
+        },
+        "required": [
+          "events"
+        ]
+      },
+      "IngestContext": {
+        "type": "object",
+        "description": "The emitter of a batch, copied onto every stored event.",
+        "properties": {
+          "platform": {
+            "type": "string",
+            "description": "ios, android, desktop, web"
+          },
+          "app_version": {
+            "type": "string"
+          },
+          "os_version": {
+            "type": "string"
+          },
+          "locale": {
+            "type": "string",
+            "description": "BCP 47 tag, e.g. en-US"
+          },
+          "sdk": {
+            "type": "string",
+            "description": "Collector name and version"
+          }
+        }
+      },
+      "IngestEvent": {
+        "type": "object",
+        "description": "One event of a batch, in the facade's spelling.\n\nThe collector also reads the snake_case spellings (``user_hash``,\n``event_id``) and ``timestamp``/``traits`` aliases; this is the shape a\ngenerated client sends. Faults are reported per event in the receipt,\nnever by refusing the batch.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Client event id, echoed into the store as event_id."
+          },
+          "kind": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/KindEnum"
+              }
+            ],
+            "default": "track"
+          },
+          "name": {
+            "type": "string",
+            "description": "Event name; a registered one for kind=track."
+          },
+          "props": {
+            "type": "object",
+            "additionalProperties": {},
+            "description": "Event properties (PII-guarded)."
+          },
+          "userHash": {
+            "type": "string",
+            "description": "sha256 hex of the account id, after identify()."
+          },
+          "ts": {
+            "type": "integer",
+            "description": "Epoch milliseconds; server time when absent."
+          },
+          "anon_id": {
+            "type": "string",
+            "description": "Overrides the batch anon_id."
+          },
+          "session_id": {
+            "type": "string",
+            "description": "Overrides the batch session_id."
+          },
+          "source": {
+            "type": "string",
+            "description": "Overrides the batch source."
+          }
+        }
+      },
+      "IngestReceipt": {
+        "type": "object",
+        "description": "What the ingest endpoint answers.\n\n``rejected`` is a LIST OF REASONS, not a count: a collector that learns\n\"3 of 20 refused\" and not why has no way to stop sending the same three\nforever, and the facade's retry ladder guarantees it will.",
+        "properties": {
+          "accepted": {
+            "type": "integer"
+          },
+          "rejected": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": {}
+            }
+          },
+          "unregistered": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "accepted"
+        ]
+      },
+      "KindEnum": {
+        "enum": [
+          "track",
+          "page",
+          "identify"
+        ],
+        "type": "string",
+        "description": "* `track` - track\n* `page` - page\n* `identify` - identify"
+      },
+      "PatchedFunnelPatch": {
+        "type": "object",
+        "properties": {
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 200
+            }
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "description": {
+            "type": "string"
+          },
+          "window_seconds": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "is_active": {
+            "type": "boolean"
+          }
+        }
+      },
+      "RollupBucket": {
+        "type": "object",
+        "description": "One group-by bucket of the events report.",
+        "properties": {
+          "group": {
+            "type": "object",
+            "additionalProperties": {}
+          },
+          "count": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "count",
+          "group"
+        ]
+      }
+    },
+    "securitySchemes": {
+      "JWTCookieAuth": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "stapel_jwt",
+        "description": "JWT token stored in cookie. Login via /auth/admin/ to get the cookie."
+      }
+    }
+  }
+}

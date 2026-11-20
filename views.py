@@ -38,18 +38,21 @@ from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import permissions
 from rest_framework.views import APIView
-from stapel_core.django.api.errors import StapelErrorResponse, StapelResponse
+from stapel_core.django.api.errors import ERR_404_NOT_FOUND, StapelErrorResponse, StapelResponse
 from stapel_core.django.api.permissions import (
     HasWorkspaceMandateIfScoped,
     IsStaffUser,
 )
+from stapel_core.django.openapi.contract import raises
 
 from . import services
 from .conf import analytics_settings
 from .errors import (
     BATCH_KEYS,
     ERR_401_FEED_TOKEN,
+    ERR_401_WRITE_KEY,
     ERR_400_BATCH_SHAPE,
+    ERR_400_BATCH_TOO_LARGE,
     ERR_400_REPORT_PERIOD,
     ERR_403_FORBIDDEN,
     ERR_404_FUNNEL,
@@ -197,6 +200,7 @@ class IngestView(SerializerSeamMixin, APIView):
         return resolved
 
     @extend_schema(request=IngestSerializer, responses={202: IngestReceiptSerializer})
+    @raises(ERR_400_BATCH_TOO_LARGE, ERR_401_WRITE_KEY)
     def post(self, request):
         max_body = int(analytics_settings.MAX_BODY_BYTES or 0)
         length = request.META.get("CONTENT_LENGTH")
@@ -248,7 +252,7 @@ class FunnelListCreateView(SerializerSeamMixin, APIView):
     request_serializer_class = FunnelCreateSerializer
     response_serializer_class = FunnelDefinitionSerializer
 
-    @extend_schema(parameters=[_MINE_PARAM], responses={200: FunnelDefinitionSerializer})
+    @extend_schema(parameters=[_MINE_PARAM], responses={200: FunnelDefinitionSerializer(many=True)})
     def get(self, request):
         query = FunnelListQuerySerializer(data=request.query_params)
         query.is_valid(raise_exception=True)
@@ -484,8 +488,10 @@ class ConversionFeedView(SerializerSeamMixin, APIView):
                 type=str,
             )
         ],
-        responses={200: OpenApiTypes.STR},
+        responses={(200, "text/csv"): OpenApiTypes.STR},
+        operation_id="analytics_api_v1_conversions_google_ads_csv_retrieve",
     )
+    @raises(ERR_404_NOT_FOUND)
     def get(self, request):
         from django.http import Http404, HttpResponse
 

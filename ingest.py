@@ -16,6 +16,13 @@ shipped first (analytics-standard v1, ``@stapel/analytics``
       ]
     }
 
+A client may also send a batch-level ``context`` object describing the
+emitter — ``platform``, ``app_version``, ``os_version``, ``locale``,
+``sdk`` — which is copied onto every stored event of the batch (a native
+collector has no other place for it short of stuffing ``props`` of every
+event). Other keys in it are not stored; a ``context`` that is not an object
+refuses the batch.
+
 Three fields the design's storage row wants (``anon_id``, ``session_id``,
 ``source``) are NOT in that payload — the shipped facade has no notion of
 them. They are therefore accepted, never required, at two levels: on the
@@ -52,6 +59,9 @@ logger = logging.getLogger(__name__)
 KINDS = ("track", "page", "identify")
 REGISTERED_KINDS = ("track",)
 
+#: The batch-level ``context`` keys stored on each event, in this order.
+CONTEXT_KEYS = ("platform", "app_version", "os_version", "locale", "sdk")
+
 
 class IngestRefused(Exception):
     """The whole batch is refused (size, encoding, write key).
@@ -82,6 +92,7 @@ class NormalizedEvent:
     source: str = "web"
     event_id: str | None = None
     unregistered: bool = False
+    context: dict = field(default_factory=dict)
 
     def payload(self) -> dict:
         """The event-store payload — the row as it is queried and erased.
@@ -104,6 +115,8 @@ class NormalizedEvent:
         ):
             if value:
                 row[key] = value
+        if self.context:
+            row["context"] = self.context
         if self.unregistered:
             row["unregistered"] = True
         return row
@@ -193,6 +206,21 @@ def _parse_ts(raw, now: datetime, skew: int, max_age: int):
     return parsed, None
 
 
+def _parse_context(raw, limit: int) -> dict:
+    """The stored ``context`` of a batch: known keys with non-empty values."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise IngestRefused("batch_context_not_object")
+    context = {}
+    for key in CONTEXT_KEYS:
+        value = raw.get(key)
+        if value in (None, "") or isinstance(value, (dict, list, bool)):
+            continue
+        context[key] = _clean_id(value, limit)
+    return context
+
+
 def resolve_source(write_key, fallback: str | None = None) -> tuple[str, bool]:
     """``(source_name, key_was_recognized)`` for a batch's write key."""
     from .conf import analytics_settings
@@ -241,6 +269,7 @@ def normalize_batch(body: dict, *, default_source: str | None = None):
     batch_source = default_source or str(analytics_settings.DEFAULT_SOURCE or "web")
     batch_anon = _clean_id(_pick(body, "anon_id", "anonId"), max_id)
     batch_session = _clean_id(_pick(body, "session_id", "sessionId"), max_id)
+    batch_context = _parse_context(body.get("context"), max_id)
 
     events: list[NormalizedEvent] = []
     rejections: list[Rejection] = []
@@ -325,6 +354,7 @@ def normalize_batch(body: dict, *, default_source: str | None = None):
                 source=str(_pick(raw, "source") or batch_source)[:max_name],
                 event_id=_clean_id(_pick(raw, "event_id", "id"), max_id),
                 unregistered=unregistered,
+                context=dict(batch_context),
             )
         )
 
@@ -332,6 +362,7 @@ def normalize_batch(body: dict, *, default_source: str | None = None):
 
 
 __all__ = [
+    "CONTEXT_KEYS",
     "KINDS",
     "REGISTERED_KINDS",
     "IngestRefused",

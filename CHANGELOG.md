@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.8.3] — 2026-11-20
+
+Patch. No migration. Requires stapel-core 0.99.3.
+
+### Added — the HTTP contract triad, on contract profile 2
+
+- `make contract` emits `docs/schema.json` (profile 1), `docs/schema.v2.json`
+  (contract profile 2: bearer scheme, error codes bound per operation) and
+  `docs/flows.json` beside `docs/errors.json`, from a single-module instance
+  at `/analytics/api/v1/` (`_codegen.py`, `codegen_urls.py`);
+  `make contract-check` (in CI) emits into a temporary directory and diffs.
+- The ingest request is typed (`IngestEvent`, `IngestContext`), and binds the
+  batch refusals a collector must handle: `error.400.analytics_batch_shape`,
+  `error.400.analytics_batch_too_large`, `error.401.analytics_write_key`,
+  `error.413.analytics_body_too_large`.
+- Gates: `tests/test_contract_profile2.py` (stapel-tools 0.84.0
+  `contract_gates`) and `tests/test_contract_wire.py`, which performs every
+  JSON operation of the profile-2 schema and validates the body.
+
+### Added — batch-level `context`
+
+- `POST /events` accepts an optional `context` (`platform`, `app_version`,
+  `os_version`, `locale`, `sdk`), copied onto every stored event and onto
+  `analytics.events.recorded`. Other keys are not stored; a non-object
+  `context` refuses the batch with `error.400.analytics_batch_shape`.
+
+### Fixed
+
+- `GET /funnels` was declared as one funnel while it answers an array.
+- The conversion feed declared a JSON string; it declares `text/csv`, a
+  stable operationId without a dot, and its 404.
+
 ## [0.8.2] — 2026-11-20
 
 Patch. No migration, no consumer edit. Requires stapel-core 0.99.2.

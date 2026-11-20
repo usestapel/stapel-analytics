@@ -21,6 +21,18 @@
           "session_id":   { "type": "string" },
           "event_id":     { "type": "string" },
           "unregistered": { "type": "boolean" },
+          "context": {
+            "type": "object",
+            "description": "The emitter, from the batch-level context: platform, app_version, os_version, locale, sdk.",
+            "properties": {
+              "platform":    { "type": "string" },
+              "app_version": { "type": "string" },
+              "os_version":  { "type": "string" },
+              "locale":      { "type": "string" },
+              "sdk":         { "type": "string" }
+            },
+            "additionalProperties": false
+          },
           "ts":           { "type": "string", "format": "date-time" }
         },
         "additionalProperties": false

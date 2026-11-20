@@ -34,10 +34,17 @@ migration-check:
 # docs/capabilities.json (stapel_analytics._capabilities): axes read from
 # conf.DEFAULTS, surface derived from the meta layer's surface_roots, prose
 # from the curated docs/capabilities.meta.json. Re-run after a version bump.
+#
+# The triad (stapel_analytics._codegen): docs/schema.json (profile 1, what
+# stapel-react reads), docs/schema.v2.json (contract profile 2, what a native
+# client generator reads), docs/flows.json and docs/errors.json, emitted on
+# Python 3.12; --check emits into a temporary directory and diffs.
 contract:
+	$(PYTHON) -m stapel_analytics._codegen --out docs
 	$(PYTHON) -m stapel_analytics._capabilities
 
 contract-check:
 	$(PYTHON) -m stapel_analytics._capabilities --check
+	$(PYTHON) -m stapel_analytics._codegen --out docs --check
 
 check: lint emit-check migration-check contract-check test

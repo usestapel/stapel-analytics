@@ -179,6 +179,9 @@ POST /analytics/api/v1/events
 {
   "write_key": "wk_live_…",          // optional; names the source
   "anon_id": "…", "session_id": "…", // optional batch-level defaults
+  "context": {"platform": "ios", "app_version": "1.4.0",
+              "os_version": "18.1", "locale": "en-US",
+              "sdk": "…"},           // optional; stored on every event
   "events": [
     {"id": "1755000000000-1",        // the facade's own id
      "kind": "track",                // track | page | identify
@@ -196,6 +199,13 @@ every server-side producer speaks the second, and making them disagree would
 hand somebody a translation layer to write by hand. `traits` is read as
 `props` (that is what `identify()` sends). `ts` accepts epoch milliseconds
 (what `Date.now()` produces) or an ISO-8601 string.
+
+`context` describes the emitter once per batch (a native collector has no
+other place for it): its five keys are copied onto every stored event as
+`context`, other keys are not stored, and a `context` that is not an object
+refuses the batch (`error.400.analytics_batch_shape`). The committed contract
+is `docs/schema.json` (profile 1) and `docs/schema.v2.json` (profile 2, the
+one a native client generator reads), emitted by `make contract`.
 
 **Answer: 202 with a receipt**, even when some events were refused.
 
